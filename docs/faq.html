@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B站视频下载助手 - 常见问题</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; line-height: 1.7; color: #1e293b; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; margin-top: 28px; scroll-margin-top: 16px; }
+    p, li { font-size: 14px; color: #334155; }
+    .muted { color: #64748b; font-size: 13px; }
+    a { color: #00a1d6; }
+    nav { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; margin: 20px 0; font-size: 13px; }
+    nav a { display: inline-block; margin: 4px 12px 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>B站视频下载助手 · 常见问题</h1>
+  <p class="muted">最后更新：2026-11-20 · <a href="index.html">隐私政策</a></p>
+
+  <p>本页解答使用中的常见问题。扩展完全免费，不收集用户数据。</p>
+
+  <nav>
+    <strong>快速跳转：</strong>
+    <a href="#login">需要登录吗</a>
+    <a href="#quality">清晰度</a>
+    <a href="#download-fail">下载失败</a>
+    <a href="#merge-slow">处理较慢</a>
+    <a href="#parts">分 P 与合集</a>
+    <a href="#file-size">文件较大</a>
+  </nav>
+
+  <h2 id="login">需要登录 B 站吗？</h2>
+  <p><strong>扩展不强制登录。</strong>未登录时通常只能下较低清晰度；登录后可能更高（视视频与账号而定）。</p>
+  <p>清晰度偏少时：登录 B 站 → 刷新视频页 → 再打开下载面板。</p>
+
+  <h2 id="quality">为什么最高只有 720P？</h2>
+  <ul>
+    <li>可选清晰度由 B 站与您的账号决定</li>
+    <li>未登录或非大会员时，高清可能不可用</li>
+    <li>部分视频本身就没有更高清晰度</li>
+  </ul>
+
+  <h2 id="download-fail">下载失败怎么办？</h2>
+  <p>按顺序试这三步即可：</p>
+  <ol>
+    <li><strong>先播放视频 5～10 秒</strong>，再点下载</li>
+    <li>改选 <strong>720P</strong> 后重试</li>
+    <li>刷新页面（F5），或在扩展管理页「重新加载」后再试</li>
+  </ol>
+  <p>仍失败时，可在下载面板查看失败阶段，使用「复制诊断」保留排查信息。诊断分享前请检查内容。</p>
+
+  <h2 id="merge-slow">进度停在「合并音视频」很久？</h2>
+  <p>高清文件需要在您电脑上合成，体积越大耗时越久。合成默认在专用 Worker 中分段处理，面板应仍可关闭，任务也可点击「取消」。</p>
+  <p>若长时间没有变化，请先取消任务，再改选 <strong>720P</strong> 重试；不要反复点击开始下载。</p>
+
+  <h2 id="parts">分 P 和右侧「合集列表」有什么区别？</h2>
+  <ul>
+    <li><strong>分 P</strong>：同一个视频里的多段（P1、P2、P3…）。面板会出现分 P 按钮，并可「队列下载全部」。</li>
+    <li><strong>视频合集</strong>：播放器右侧的一组视频。面板提供「列表下载」时，可勾选或全选已加载的合集条目，按设置并发下载。</li>
+  </ul>
+  <p>普通单集视频可直接点「开始下载」。</p>
+
+  <h2 id="queue-download">分 P 队列怎么用？</h2>
+  <ul>
+    <li><strong>开始下载</strong>：只下当前选中的那一 P</li>
+    <li><strong>队列下载全部</strong>：按 P1 → P2 → … 安排任务，同时下载 1–5 项（默认 3），每 P 一个文件</li>
+  </ul>
+
+  <h2 id="file-size">提示文件较大？</h2>
+  <p>1080P 或体积较大的视频<strong>没有固定大小上限</strong>，只要片源可用就会尝试下载。但合成会占用较多内存与 CPU；电脑性能有限时建议一次只下载一个大文件，合成期间可随时取消。</p>
+
+  <h2>支持哪些页面？</h2>
+  <p>支持普通视频、列表与合集、UP 主空间投稿，以及当前账号可访问的官方剧集。官方剧集的可选视频和音频以 B 站返回为准，受试看、地区或内容保护限制的媒体不可下载。</p>
+
+</body>
+</html>

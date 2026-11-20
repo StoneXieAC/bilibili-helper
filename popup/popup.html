@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="../shared/design-system.css">
+  <link rel="stylesheet" href="../shared/ambient-themes.css">
+</head>
+<body data-theme="bilibili">
+  <div class="popup">
+    <header class="popup-header">
+      <img src="../icons/icon48.png?v=5" width="30" height="30" alt="" class="popup-icon">
+      <div class="popup-header-text">
+        <h1 data-i18n="appTitle">B站bilibili下载助手</h1>
+        <span id="app-version" class="popup-version"></span>
+      </div>
+    </header>
+
+    <main class="popup-body">
+      <div id="state-loading">
+        <div class="popup-detect loading">
+          <span class="popup-dot pulse"></span>
+          <span data-i18n="identifying">正在识别页面…</span>
+        </div>
+
+        <div class="popup-video-card is-loading">
+          <div class="popup-cover-wrap">
+            <div class="popup-sk-cover popup-shimmer"></div>
+          </div>
+          <div class="popup-video-meta">
+            <div class="popup-video-sk">
+              <span class="popup-sk-line popup-shimmer"></span>
+              <span class="popup-sk-line popup-shimmer short"></span>
+              <span class="popup-sk-line popup-shimmer shorter"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="popup-section">
+          <div class="popup-section-head" data-i18n="availableQuality">可用清晰度</div>
+          <div class="popup-quality-tags">
+            <span class="popup-q-tag loading popup-shimmer w1" data-i18n="loading">加载中</span>
+            <span class="popup-q-tag loading popup-shimmer w2"></span>
+            <span class="popup-q-tag loading popup-shimmer w3"></span>
+          </div>
+        </div>
+      </div>
+
+      <div id="state-empty" class="hidden">
+        <div class="popup-empty-hero">
+          <div class="popup-empty-icon" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="3"/>
+              <path d="M10 9l5 3-5 3V9z"/>
+            </svg>
+          </div>
+          <p class="popup-empty-title" data-i18n="emptyTitle">支持视频、列表、UP 主空间与官方剧集</p>
+          <p class="popup-empty-desc" data-i18n="emptyDesc">请打开 B 站 /video/、/list/、UP 主空间或 /bangumi/play/ 页面。媒体须为当前账号可访问的片源。</p>
+          <p id="empty-current-site" class="popup-empty-site" data-i18n="currentPageEmpty">当前页面：—</p>
+        </div>
+
+        <div class="popup-steps">
+          <div class="popup-step">
+            <span class="popup-step-num">1</span>
+            <span class="popup-step-text" data-i18n="stepOpen">打开支持的 B 站视频、列表或空间页面</span>
+          </div>
+          <div class="popup-step">
+            <span class="popup-step-num">2</span>
+            <span class="popup-step-text" data-i18n="stepFab">点击浏览器工具栏中的下载助手图标</span>
+          </div>
+          <div class="popup-step">
+            <span class="popup-step-num">3</span>
+            <span class="popup-step-text" data-i18n="stepDownload">选择清晰度和内容；批量可同时下载 1–5 项</span>
+          </div>
+        </div>
+
+        <div class="popup-feature-tags">
+          <span class="popup-feature-tag" data-i18n="tagMp4">MP4 / M4A</span>
+          <span class="popup-feature-tag" data-i18n="tagFree">完全免费</span>
+        </div>
+
+        <a id="btn-go-bili" class="popup-btn" href="https://www.bilibili.com/video/BV1794y127up/?spm_id_from=333.337.search-card.all.click" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg>
+          <span data-i18n="openSample">打开示例视频页</span>
+        </a>
+      </div>
+
+      <div id="state-error" class="hidden">
+        <div class="popup-detect error">
+          <span class="popup-dot error"></span>
+          <span id="error-text" data-i18n="loadFailed">加载失败</span>
+        </div>
+        <div class="popup-empty-hero compact">
+          <p class="popup-empty-title" data-i18n="errorTitle">暂时无法读取视频信息</p>
+          <p class="popup-error-hint" data-i18n="errorHint">请刷新 B 站视频页后，再点击扩展图标重试</p>
+        </div>
+        <button id="btn-retry" type="button" class="popup-btn popup-btn-outline" data-i18n="retry">刷新并重试</button>
+      </div>
+
+      <div class="popup-history-section">
+        <button id="popup-history-toggle" type="button" class="popup-history-toggle">
+          <span data-i18n="history">下载历史</span>
+          <span id="popup-history-count" class="popup-history-count hidden"></span>
+        </button>
+        <div id="popup-history-panel" class="popup-history-panel hidden">
+          <div id="popup-history-list" class="popup-history-list"></div>
+          <button id="popup-history-clear" type="button" class="popup-history-clear hidden" data-i18n="historyClear">清空历史</button>
+        </div>
+      </div>
+    </main>
+
+    <footer class="popup-footer">
+      <div class="popup-footer-line">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span data-i18n="disclaimer">仅供个人学习 · 请遵守 B 站用户协议</span>
+      </div>
+    </footer>
+  </div>
+  <script src="../shared/theme-manager.js"></script>
+  <script src="../shared/i18n-languages.js"></script>
+  <script src="../shared/i18n.js"></script>
+  <script src="../shared/i18n-extra.js"></script>
+  <script src="../shared/i18n-ja-ko.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

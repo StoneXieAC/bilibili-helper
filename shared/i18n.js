@@ -1,0 +1,578 @@
+(function (root) {
+  'use strict';
+  const KEY = 'biliDlLanguage_v1';
+  const messages = {
+    'zh-CN': {
+      followBrowser: '跟随浏览器',
+      chinese: '简体中文',
+      traditionalChinese: '繁體中文',
+      english: 'English',
+      appTitle: 'B站bilibili下载助手',
+      close: '关闭',
+      modeLabel: '下载模式',
+      singleVideo: '单视频',
+      listDownload: '列表下载',
+      coverDownload: '下载封面',
+      quality: '清晰度',
+      qualityStrategy: '清晰度策略',
+      qualityExact: '使用所选清晰度',
+      qualityHighest: '始终最高可用',
+      format: '格式',
+      mp4: 'MP4 视频',
+      m4a: 'M4A 音频',
+      streamPreference: '视频质量',
+      streamHighBitrate: '高码率优先（推荐）',
+      streamCompatible: '兼容优先',
+      streamPreferenceTitle: '仅在同一清晰度的原始视频流之间选择',
+      estimateEmpty: '预计大小 —',
+      startDownload: '开始下载',
+      queueAllParts: '队列下载全部分 P',
+      pauseAll: '暂停全部',
+      cancelQueue: '取消整队',
+      listDownloadKind: '下载内容',
+      videoOnly: '仅视频',
+      audioOnly: '仅音频',
+      videoAndAudio: '视频+音频',
+      listSearchPlaceholder: '搜索已加载视频标题',
+      listFilter: '列表筛选',
+      refreshCurrentPage: '刷新列表',
+      refreshCurrentPageTitle: '重新读取当前页的视频列表',
+      filterAll: '全部',
+      filterSelected: '已选',
+      sortDefault: '默认',
+      sortNewest: '最新',
+      sortOldest: '最早',
+      videoList: '视频列表',
+      selectAll: '全选',
+      selectAllTitle: '选择当前已加载的所有视频',
+      loadMore: '继续加载',
+      downloadSelected: '下载已选视频',
+      retryIncomplete: '重试未完成',
+      diagnostics: '诊断日志',
+      tasks: '任务中心',
+      settings: '设置',
+      backToDownload: '返回下载',
+      settingsHint: '已入队任务不受影响',
+      theme: '主题色',
+      language: '语言',
+      filename: '文件名',
+      filenameRule: '文件名规则',
+      presetTitle: '默认（仅标题）',
+      presetTitleBvid: '标题 + BV',
+      presetTitleBvidQuality: '标题 + BV + 清晰度',
+      presetDetailed: '标题 + UP + BV + 清晰度',
+      presetCustom: '自定义…',
+      customTemplate: '自定义文件名模板',
+      insertField: '插入变量',
+      resetFilename: '恢复默认文件名',
+      themeSaved: '主题已保存',
+      themeSaveFailed: '主题保存失败',
+      saved: '已保存',
+      settingsLoadFailed: '设置模块未加载，请刷新页面后重试。',
+      defaultTheme: '默认',
+      'theme-mist-cyan': '苍雾青',
+      'theme-pine-mist': '松雾绿',
+      'theme-night-purple': '夜雾紫',
+      'theme-dark-crimson': '暗绯红',
+      'theme-ember-orange': '余烬橙',
+      'theme-copper-smoke': '铜烟棕',
+      'theme-deep-ocean': '深海蓝',
+      'theme-obsidian': '曜石黑',
+      chipTitle: '标题',
+      chipAuthor: 'UP主',
+      chipBvid: 'BV号',
+      chipPart: '分P编号',
+      chipPartTitle: '分P标题',
+      chipIndex: '批次序号',
+      chipQuality: '清晰度',
+      chipDate: '日期',
+      loading: '加载中',
+      identifying: '正在识别页面…',
+      openPanel: '打开下载面板',
+      availableQuality: '可用清晰度',
+      emptyDetect: '当前不是支持的下载页面',
+      emptyTitle: '支持视频、列表、UP 主空间与官方剧集',
+      emptyDesc: '请打开 B 站 /video/、/list/、UP 主空间或 /bangumi/play/ 页面。媒体须为当前账号可访问的片源。',
+      currentPage: '当前页面：',
+      currentPageEmpty: '当前页面：—',
+      currentPageUnknown: '当前页面：未知',
+      stepOpen: '打开支持的 B 站视频、列表或空间页面',
+      stepFab: '点击浏览器工具栏中的下载助手图标',
+      stepDownload: '选择清晰度和内容；批量可同时下载 1–5 项',
+      tagMp4: 'MP4 / M4A',
+      tagFree: '完全免费',
+      openSample: '打开示例视频页',
+      loadFailed: '加载失败',
+      errorTitle: '暂时无法读取视频信息',
+      errorHint: '请刷新 B 站视频页后，再点击扩展图标重试',
+      retry: '刷新并重试',
+      history: '下载历史',
+      historyClear: '清空历史',
+      historyOpen: '打开',
+      historyShowFile: '显示文件',
+      pgcChecking: '正在检查播放权限…',
+      pgcAccessSummary: '共 {total} 项 · 可选 {available} · 检查中 {checking} · 不可选 {unavailable}',
+      pgcAvailable: '可下载',
+      pgcPreview: '仅可试看，需要完整观看权限',
+      pgcRegion: '当前地区不可观看',
+      pgcProtected: '受保护片源，暂不支持下载',
+      pgcPermission: '需要登录或会员/付费权限',
+      pgcCheckError: '暂时无法确认，请刷新列表重试',
+      pgcNoTrack: '没有所选视频或音频轨',
+      pgcCoverOnly: '可下载封面',
+      historyFileMissing: '文件不可用',
+      historyEmpty: '暂无下载记录',
+      untitled: '未命名',
+      disclaimer: '仅供个人学习 · 请遵守 B 站用户协议',
+      justNow: '刚刚',
+      minutesAgo: '{n}分钟前',
+      hoursAgo: '{n}小时前',
+      daysAgo: '{n}天前',
+      monthsAgo: '{n}个月前',
+      yearsAgo: '{n}年前'
+    },
+    'zh-TW': {
+      followBrowser: '跟隨瀏覽器',
+      chinese: '简体中文',
+      traditionalChinese: '繁體中文',
+      english: 'English',
+      appTitle: 'B站bilibili下載助手',
+      close: '關閉',
+      modeLabel: '下載模式',
+      singleVideo: '單一影片',
+      listDownload: '列表下載',
+      coverDownload: '下載封面',
+      quality: '畫質',
+      qualityStrategy: '畫質策略',
+      qualityExact: '使用所選畫質',
+      qualityHighest: '始終最高可用',
+      format: '格式',
+      mp4: 'MP4 影片',
+      m4a: 'M4A 音訊',
+      streamPreference: '影片品質',
+      streamHighBitrate: '高碼率優先（推薦）',
+      streamCompatible: '相容優先',
+      streamPreferenceTitle: '僅在同一畫質的原始影片串流之間選擇',
+      estimateEmpty: '預估大小 —',
+      startDownload: '開始下載',
+      queueAllParts: '佇列下載全部分 P',
+      pauseAll: '全部暫停',
+      cancelQueue: '取消整隊',
+      listDownloadKind: '下載內容',
+      videoOnly: '僅影片',
+      audioOnly: '僅音訊',
+      videoAndAudio: '影片+音訊',
+      listSearchPlaceholder: '搜尋已載入影片標題',
+      listFilter: '列表篩選',
+      refreshCurrentPage: '重新整理列表',
+      refreshCurrentPageTitle: '重新讀取目前頁面的影片列表',
+      filterAll: '全部',
+      filterSelected: '已選',
+      sortDefault: '預設',
+      sortNewest: '最新',
+      sortOldest: '最早',
+      videoList: '影片列表',
+      selectAll: '全選',
+      selectAllTitle: '選擇目前已載入的所有影片',
+      loadMore: '繼續載入',
+      downloadSelected: '下載已選影片',
+      retryIncomplete: '重試未完成',
+      diagnostics: '診斷記錄',
+      tasks: '任務中心',
+      settings: '設定',
+      backToDownload: '返回下載',
+      settingsHint: '已加入佇列的任務不受影響',
+      theme: '主題色',
+      language: '語言',
+      filename: '檔名',
+      filenameRule: '檔名規則',
+      presetTitle: '預設（僅標題）',
+      presetTitleBvid: '標題 + BV',
+      presetTitleBvidQuality: '標題 + BV + 畫質',
+      presetDetailed: '標題 + UP + BV + 畫質',
+      presetCustom: '自訂…',
+      customTemplate: '自訂檔名範本',
+      insertField: '插入變數',
+      resetFilename: '恢復預設檔名',
+      themeSaved: '主題已儲存',
+      themeSaveFailed: '主題儲存失敗',
+      saved: '已儲存',
+      settingsLoadFailed: '設定模組未載入，請重新整理頁面後重試。',
+      defaultTheme: '預設',
+      'theme-mist-cyan': '蒼霧青',
+      'theme-pine-mist': '松霧綠',
+      'theme-night-purple': '夜霧紫',
+      'theme-dark-crimson': '暗緋紅',
+      'theme-ember-orange': '餘燼橙',
+      'theme-copper-smoke': '銅煙棕',
+      'theme-deep-ocean': '深海藍',
+      'theme-obsidian': '曜石黑',
+      chipTitle: '標題',
+      chipAuthor: 'UP主',
+      chipBvid: 'BV號',
+      chipPart: '分P編號',
+      chipPartTitle: '分P標題',
+      chipIndex: '批次序號',
+      chipQuality: '畫質',
+      chipDate: '日期',
+      loading: '載入中',
+      identifying: '正在識別頁面…',
+      openPanel: '開啟下載面板',
+      availableQuality: '可用畫質',
+      emptyDetect: '目前不是支援的下載頁面',
+      emptyTitle: '支援影片、列表、UP 主空間與官方劇集',
+      emptyDesc: '請開啟 B 站 /video/、/list/、UP 主空間或 /bangumi/play/ 頁面。媒體須為目前帳號可存取的來源。',
+      currentPage: '目前頁面：',
+      currentPageEmpty: '目前頁面：—',
+      currentPageUnknown: '目前頁面：未知',
+      stepOpen: '開啟支援的 B 站影片、列表或空間頁面',
+      stepFab: '點選瀏覽器工具列中的下載助手圖示',
+      stepDownload: '選擇畫質與內容；批次可同時下載 1–5 項',
+      tagMp4: 'MP4 / M4A',
+      tagFree: '完全免費',
+      openSample: '開啟範例影片頁',
+      loadFailed: '載入失敗',
+      errorTitle: '暫時無法讀取影片資訊',
+      errorHint: '請重新整理 B 站影片頁後，再點選擴充功能圖示重試',
+      retry: '重新整理並重試',
+      history: '下載記錄',
+      historyClear: '清除記錄',
+      historyOpen: '開啟',
+      historyShowFile: '顯示檔案',
+      pgcChecking: '正在檢查播放權限…',
+      pgcAccessSummary: '共 {total} 項 · 可選 {available} · 檢查中 {checking} · 不可選 {unavailable}',
+      pgcAvailable: '可下載',
+      pgcPreview: '僅可試看，需要完整觀看權限',
+      pgcRegion: '目前地區無法觀看',
+      pgcProtected: '受保護片源，暫不支援下載',
+      pgcPermission: '需要登入或會員／付費權限',
+      pgcCheckError: '暫時無法確認，請重新整理列表',
+      pgcNoTrack: '沒有所選影片或音訊軌',
+      pgcCoverOnly: '可下載封面',
+      historyFileMissing: '檔案無法使用',
+      historyEmpty: '還沒有下載記錄',
+      untitled: '未命名',
+      disclaimer: '僅供個人學習 · 請遵守 B 站使用者協議',
+      justNow: '剛剛',
+      minutesAgo: '{n}分鐘前',
+      hoursAgo: '{n}小時前',
+      daysAgo: '{n}天前',
+      monthsAgo: '{n}個月前',
+      yearsAgo: '{n}年前'
+    },
+    en: {
+      followBrowser: 'Follow browser',
+      chinese: '简体中文',
+      traditionalChinese: '繁體中文',
+      english: 'English',
+      appTitle: 'Bilibili Video Download Assistant',
+      close: 'Close',
+      modeLabel: 'Download mode',
+      singleVideo: 'Single video',
+      listDownload: 'List download',
+      coverDownload: 'Save cover',
+      quality: 'Quality',
+      qualityStrategy: 'Quality strategy',
+      qualityExact: 'Use selected quality',
+      qualityHighest: 'Highest available',
+      format: 'Format',
+      mp4: 'MP4 video',
+      m4a: 'M4A audio',
+      streamPreference: 'Video stream',
+      streamHighBitrate: 'Higher bitrate (recommended)',
+      streamCompatible: 'Compatibility first',
+      streamPreferenceTitle: 'Choose between raw streams at the same quality',
+      estimateEmpty: 'Estimated size —',
+      startDownload: 'Start download',
+      queueAllParts: 'Queue all parts',
+      pauseAll: 'Pause all',
+      cancelQueue: 'Cancel queue',
+      listDownloadKind: 'Download content',
+      videoOnly: 'Video only',
+      audioOnly: 'Audio only',
+      videoAndAudio: 'Video + audio',
+      listSearchPlaceholder: 'Search loaded titles',
+      listFilter: 'List filters',
+      refreshCurrentPage: 'Refresh list',
+      refreshCurrentPageTitle: 'Reload the video list for the current page',
+      filterAll: 'All',
+      filterSelected: 'Selected',
+      sortDefault: 'Default',
+      sortNewest: 'Newest',
+      sortOldest: 'Oldest',
+      videoList: 'Video list',
+      selectAll: 'Select all',
+      selectAllTitle: 'Select all loaded videos',
+      loadMore: 'Load more',
+      downloadSelected: 'Download selected',
+      retryIncomplete: 'Retry incomplete',
+      diagnostics: 'Diagnostics',
+      tasks: 'Tasks',
+      settings: 'Settings',
+      backToDownload: 'Back to download',
+      settingsHint: 'Queued tasks are not affected',
+      theme: 'Theme',
+      language: 'Language',
+      filename: 'Filename',
+      filenameRule: 'Filename rule',
+      presetTitle: 'Default (title only)',
+      presetTitleBvid: 'Title + BV',
+      presetTitleBvidQuality: 'Title + BV + quality',
+      presetDetailed: 'Title + uploader + BV + quality',
+      presetCustom: 'Custom…',
+      customTemplate: 'Custom filename template',
+      insertField: 'Insert field',
+      resetFilename: 'Reset filename',
+      themeSaved: 'Theme saved',
+      themeSaveFailed: 'Could not save theme',
+      saved: 'Saved',
+      settingsLoadFailed: 'Settings module failed to load. Refresh the page and try again.',
+      defaultTheme: 'Default',
+      'theme-mist-cyan': 'Mist Cyan',
+      'theme-pine-mist': 'Pine Mist',
+      'theme-night-purple': 'Night Purple',
+      'theme-dark-crimson': 'Dark Crimson',
+      'theme-ember-orange': 'Ember Orange',
+      'theme-copper-smoke': 'Copper Smoke',
+      'theme-deep-ocean': 'Deep Ocean',
+      'theme-obsidian': 'Obsidian',
+      chipTitle: 'Title',
+      chipAuthor: 'Uploader',
+      chipBvid: 'BV ID',
+      chipPart: 'Part no.',
+      chipPartTitle: 'Part title',
+      chipIndex: 'Batch index',
+      chipQuality: 'Quality',
+      chipDate: 'Date',
+      loading: 'Loading',
+      identifying: 'Reading this page…',
+      openPanel: 'Open download panel',
+      availableQuality: 'Available quality',
+      emptyDetect: 'This page is not supported',
+      emptyTitle: 'Supports videos, lists, creator spaces and official episodes',
+      emptyDesc: 'Open a Bilibili /video/, /list/, creator space or /bangumi/play/ page. Media availability depends on your account permissions.',
+      currentPage: 'Current page: ',
+      currentPageEmpty: 'Current page: —',
+      currentPageUnknown: 'Current page: Unknown',
+      stepOpen: 'Open a supported Bilibili video, list or creator space',
+      stepFab: 'Click the Download Assistant icon in the browser toolbar',
+      stepDownload: 'Choose quality and content; batches download 1–5 items at once',
+      tagMp4: 'MP4 / M4A',
+      tagFree: 'Free',
+      openSample: 'Open sample video',
+      loadFailed: 'Load failed',
+      errorTitle: 'Cannot read video info yet',
+      errorHint: 'Refresh the Bilibili page, then click the extension icon again',
+      retry: 'Refresh and retry',
+      history: 'Download history',
+      historyClear: 'Clear history',
+      historyOpen: 'Open',
+      historyShowFile: 'Show file',
+      pgcChecking: 'Checking playback access…',
+      pgcAccessSummary: '{total} items · {available} selectable · {checking} checking · {unavailable} unavailable',
+      pgcAvailable: 'Available',
+      pgcPreview: 'Preview only; full viewing access required',
+      pgcRegion: 'Unavailable in this region',
+      pgcProtected: 'Protected media; download unsupported',
+      pgcPermission: 'Login, membership or purchase required',
+      pgcCheckError: 'Unable to check; refresh the list to retry',
+      pgcNoTrack: 'Selected video or audio track unavailable',
+      pgcCoverOnly: 'Cover available',
+      historyFileMissing: 'File unavailable',
+      historyEmpty: 'No downloads yet',
+      untitled: 'Untitled',
+      disclaimer: 'For personal learning only. Follow Bilibili\'s terms.',
+      justNow: 'Just now',
+      minutesAgo: '{n} minutes ago',
+      hoursAgo: '{n} hours ago',
+      daysAgo: '{n} days ago',
+      monthsAgo: '{n} months ago',
+      yearsAgo: '{n} years ago'
+    }
+  };
+  // Keep the dictionary shape identical for every selectable locale.  The
+  // English entries are an intentional per-key fallback until a locale has a
+  // dedicated translation in i18n-extra.js; this is preferable to exposing
+  // raw message keys in controls that are added by a later UI revision.
+  const LANGUAGE_OPTIONS = Object.freeze([
+    ['zh-CN', '简体中文'], ['zh-TW', '繁體中文'], ['en', 'English'],
+    ['ja', '日本語'], ['ko', '한국어'], ['es', 'Español'],
+    ['fr', 'Français'], ['pt-BR', 'Português (Brasil)'], ['de', 'Deutsch']
+  ]);
+  // Optional locale data can provide a translator before this file loads.  It
+  // is applied again whenever an extension dictionary is merged, so late
+  // message bundles receive the same locale coverage as the base UI.
+  function applyLocaleTranslations() {
+    const translate = root.BiliDlLocaleTranslations?.translate;
+    if (typeof translate !== 'function') return;
+    for (const [code] of LANGUAGE_OPTIONS) {
+      if (!['es', 'fr', 'pt-BR', 'de'].includes(code)) continue;
+      const dictionary = messages[code] || (messages[code] = { ...messages.en });
+      for (const [key, english] of Object.entries(messages.en)) {
+        dictionary[key] = translate(code, key, english);
+      }
+    }
+  }
+  for (const [code] of LANGUAGE_OPTIONS) {
+    if (!messages[code]) messages[code] = { ...messages.en };
+  }
+  Object.values(messages).forEach((dictionary) => Object.assign(dictionary, {
+    followBrowser: dictionary.followBrowser || 'Follow browser',
+    japanese: dictionary.japanese || '日本語', korean: dictionary.korean || '한국어',
+    spanish: dictionary.spanish || 'Español', french: dictionary.french || 'Français',
+    portuguese: dictionary.portuguese || 'Português (Brasil)', german: dictionary.german || 'Deutsch'
+  }));
+  applyLocaleTranslations();
+  let preference = 'auto';
+  let language = 'zh-CN';
+  const listeners = new Set();
+  function api() {
+    return root.browser || root.chrome;
+  }
+  function storageGet(key) {
+    const ext = api();
+    const get = ext?.storage?.local?.get;
+    if (typeof get !== 'function') return Promise.resolve({});
+    try {
+      const result = get.call(ext.storage.local, key);
+      if (result && typeof result.then === 'function') return result;
+    } catch (_) {}
+    return new Promise((resolve) => {
+      try {
+        get.call(ext.storage.local, key, (value) => resolve(value || {}));
+      } catch (_) {
+        resolve({});
+      }
+    });
+  }
+  function storageSet(value) {
+    const ext = api();
+    const set = ext?.storage?.local?.set;
+    if (typeof set !== 'function') return Promise.reject(new Error('Storage is unavailable'));
+    try {
+      const result = set.call(ext.storage.local, value);
+      if (result && typeof result.then === 'function') return result;
+    } catch (_) {}
+    return new Promise((resolve, reject) => {
+      try {
+        set.call(ext.storage.local, value, () => {
+          const error = ext?.runtime?.lastError;
+          if (error) reject(new Error(error.message || 'Could not save settings'));
+          else resolve();
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+  function browserLanguage() {
+    const ui = String(api()?.i18n?.getUILanguage?.() || root.navigator?.language || 'zh-CN').toLowerCase().replace(/_/g, '-');
+    if (/^zh-(?:tw|hk|mo|hant)(?:-|$)/.test(ui)) return 'zh-TW';
+    if (/^zh(?:-cn|-sg|-hans)?(?:-|$)/.test(ui) || ui === 'zh') return 'zh-CN';
+    if (/^en(?:-|$)/.test(ui)) return 'en';
+    if (/^ja(?:-|$)/.test(ui)) return 'ja';
+    if (/^ko(?:-|$)/.test(ui)) return 'ko';
+    if (/^es(?:-|$)/.test(ui)) return 'es';
+    if (/^fr(?:-|$)/.test(ui)) return 'fr';
+    if (/^pt(?:-|$)/.test(ui)) return 'pt-BR';
+    if (/^de(?:-|$)/.test(ui)) return 'de';
+    return 'zh-CN';
+  }
+  function normalizePreference(value) {
+    if (value === 'auto' || value == null || value === '') return 'auto';
+    const normalized = String(value).replace(/_/g, '-').toLowerCase();
+    if (normalized === 'en') return 'en';
+    if (/^zh-(?:tw|hk|mo|hant)(?:-|$)/.test(normalized)) return 'zh-TW';
+    if (/^zh(?:-cn|-sg|-hans)?(?:-|$)/.test(normalized)) return 'zh-CN';
+    const match = LANGUAGE_OPTIONS.find(([code]) => code.toLowerCase() === normalized || code.toLowerCase().split('-')[0] === normalized.split('-')[0]);
+    if (match) return match[0];
+    return 'auto';
+  }
+  function resolveLanguage(pref) {
+    const normalized = normalizePreference(pref);
+    return normalized === 'auto' ? browserLanguage() : normalized;
+  }
+  function t(key, values) {
+    const fallback = language.startsWith('zh') ? messages['zh-CN'] : messages.en;
+    const template = messages[language]?.[key] ?? fallback?.[key] ?? messages.en?.[key] ?? key;
+    return String(template).replace(/\{(\w+)\}/g, (_, name) => String(values?.[name] ?? ''));
+  }
+  function apply(scope) {
+    const node = scope?.querySelectorAll ? scope : root.document;
+    if (!node?.querySelectorAll) return language;
+    if (node.documentElement) {
+      node.documentElement.lang = language;
+    }
+    node.querySelectorAll('[data-i18n]').forEach((element) => {
+      element.textContent = t(element.dataset.i18n);
+    });
+    node.querySelectorAll('[data-i18n-aria]').forEach((element) => {
+      element.setAttribute('aria-label', t(element.dataset.i18nAria));
+    });
+    node.querySelectorAll('[data-i18n-title]').forEach((element) => {
+      const values = {};
+      element.title = t(element.dataset.i18nTitle, values);
+    });
+    node.querySelectorAll('[data-i18n-placeholder]').forEach((element) => {
+      element.placeholder = t(element.dataset.i18nPlaceholder);
+    });
+    node.querySelectorAll('option[data-i18n]').forEach((element) => {
+      element.textContent = t(element.dataset.i18n);
+    });
+    node.querySelectorAll('select[data-i18n-aria]').forEach((element) => {
+      element.setAttribute('aria-label', t(element.dataset.i18nAria));
+    });
+    return language;
+  }
+  function emit() {
+    listeners.forEach((listener) => {
+      try { listener({ preference, language }); } catch (_) {}
+    });
+  }
+  const ready = storageGet(KEY).then((stored) => {
+    preference = normalizePreference(stored?.[KEY]);
+    language = resolveLanguage(preference);
+    return { preference, language };
+  }).catch(() => ({ preference, language }));
+  async function save(value) {
+    preference = normalizePreference(value);
+    language = resolveLanguage(preference);
+    await storageSet({ [KEY]: preference });
+    emit();
+    return { preference, language };
+  }
+  api()?.storage?.onChanged?.addListener?.((changes, areaName) => {
+    if (areaName !== 'local' || !changes?.[KEY]) return;
+    preference = normalizePreference(changes[KEY].newValue);
+    const next = resolveLanguage(preference);
+    if (next === language && changes[KEY].oldValue === changes[KEY].newValue) return;
+    language = next;
+    emit();
+  });
+  function mergeMessages(extra) {
+    if (!extra || typeof extra !== 'object') return;
+    for (const lang of Object.keys(extra)) {
+      if (!messages[lang]) messages[lang] = { ...messages.en };
+      Object.assign(messages[lang], extra[lang]);
+    }
+    applyLocaleTranslations();
+  }
+  root.BiliDlI18n = {
+    KEY,
+    languages: LANGUAGE_OPTIONS.map(([code, label]) => ({ code, label })),
+    languageOptions: () => LANGUAGE_OPTIONS.map(([code, label]) => ({ code, label })),
+    ready,
+    preference: () => preference,
+    language: () => language,
+    browserLanguage,
+    resolveLanguage,
+    t,
+    apply,
+    save,
+    mergeMessages,
+    onChange(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : window);

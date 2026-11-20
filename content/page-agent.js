@@ -1,0 +1,1691 @@
+/**
+ * B站下载 — 页面内下载代理（MAIN world）
+ */
+(function () {
+  'use strict';
+  if (window.__BILI_DL_AGENT__) return;
+  window.__BILI_DL_AGENT__ = true;
+
+  const PANEL = 'bili-dl-panel';
+  const AGENT = 'bili-dl-agent';
+
+  const API_REFERRER = location.origin + '/';
+  // 常用镜像节点
+  const MIRRORS = [
+    'upos-sz-mirrorali.bilivideo.com',
+    'upos-sz-mirrorcos.bilivideo.com',
+    'upos-sz-mirrorbos.bilivideo.com',
+    'upos-sz-mirrorhw.bilivideo.com',
+    'upos-sz-mirror08c.bilivideo.com',
+    'upos-sz-mirrorhwo1.bilivideo.com'
+  ];
+
+  // playurl 常返回的节点，在扩展/脚本环境易 403，下载时跳过或置后
+  const BAD_HOST_PATTERNS = [
+    /akamaized/i,
+    /estgoss/i,
+    /mcdn\.bilibili\.cn/i,
+    /data\.bilibili/i,
+    /api\.bilibili/i
+  ];
+
+  // DASH + 4K + 8K + AV1. Request high-resolution codecs without adding
+  // HDR/Dolby variants to the existing numeric quality-selection strategy.
+  const DASH_FNVAL = 16 | 128 | 1024 | 2048;
+  const QUALITY_MAP = {
+    127: '8K', 120: '4K', 116: '1080P60', 112: '1080P+', 80: '1080P',
+    64: '720P', 32: '480P', 16: '360P', 6: '240P'
+  };
+
+  const PROBE_TIMEOUT_MS = 4000;
+  const PROBE_PARALLEL = 3;
+  // 网络分片到达频率很高时，频繁跨 world 通信和重绘进度条会反过来占用主线程。
+  // 仅节流展示，不节流 reader.read() 或网络读取；结束时始终立即上报。
+  const PROGRESS_REPORT_INTERVAL_MS = 150;
+  /** 会话内缓存探测成功的镜像 hostname，同页后续下载优先复用 */
+  const sessionMirrorCache = new Set();
+
+  function reply(id, payload) {
+    window.postMessage({ source: AGENT, id, ...payload }, '*');
+  }
+
+  function log(step, msg) {
+    reply(null, { type: 'LOG', step, msg });
+    console.log('[BiliDL-Agent]', step, msg);
+  }
+
+  function parseVideoId(href) {
+    let path = '';
+    try { path = new URL(href).pathname; } catch { path = href; }
+    let m = path.match(/\/video\/(BV[a-zA-Z0-9]+)/i);
+    if (m) return { kind: 'bvid', value: m[1] };
+    m = path.match(/\/video\/av(\d+)/i);
+    if (m) return { kind: 'aid', value: m[1] };
+    m = href.match(/(BV[a-zA-Z0-9]{10})/i);
+    if (m) return { kind: 'bvid', value: m[1] };
+    m = path.match(/\/bangumi\/play\/(ep|ss)(\d+)/i);
+    if (m) return { kind: m[1].toLowerCase() === 'ep' ? 'epid' : 'season', value: m[2] };
+    return null;
+  }
+
+  function isUposStylePath(url) {
+    try {
+      const u = new URL(url);
+      return /upgcxcode|\.m4s($|\?)/i.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 换镜像节点。akamaized / mcdn 只要是标准 upos 路径，也可以改写到国内镜像 */
+  function rewriteCdnUrl(url, mirrorHost) {
+    try {
+      const u = new URL(url);
+      if (u.pathname.startsWith('/v1/resource')) return null;
+      const host = u.hostname || '';
+      const known = /upos|akamaized|mcdn\.bilivideo/i.test(host);
+      if (!known && !isUposStylePath(url)) return null;
+      u.hostname = mirrorHost;
+      u.protocol = 'https:';
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  function isDownloadableCdnUrl(url) {
+    try {
+      const u = new URL(url);
+      if (BAD_HOST_PATTERNS.some((re) => re.test(u.hostname))) return false;
+      if (u.pathname.startsWith('/v1/resource')) return false;
+      if (/mcdn\.bilivideo\.cn:\d+/i.test(u.host)) return false;
+      // upos DASH 节点 + 低清 durl 的 cn-* 节点
+      return /\.bilivideo\.(com|cn)$/i.test(u.hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 当前节点不可直连时，仍可拿来改写镜像 */
+  function isRewriteableStreamUrl(url) {
+    try {
+      const u = new URL(url);
+      if (u.pathname.startsWith('/v1/resource')) return false;
+      if (!isUposStylePath(url) && !/upos/i.test(u.hostname || '')) return false;
+      return /upos|akamaized|mcdn\.bilivideo|\.bilivideo\.(com|cn)$/i.test(u.hostname || '');
+    } catch {
+      return false;
+    }
+  }
+
+  function urlScore(url) {
+    if (!url) return 0;
+    if (/mirrorali|mirrorcos|mirrorbos/.test(url)) return 100;
+    if (/upos-sz-mirror/.test(url)) return 95;
+    if (/upos/.test(url) && !/estgoss/.test(url)) return 80;
+    if (/upos/.test(url)) return 60;
+    if (/\.bilivideo\.(com|cn)/i.test(url)) return 50;
+    return 0;
+  }
+
+  function extractDurlUrls(item) {
+    if (!item) return [];
+    const urls = [];
+    if (item.url) urls.push(item.url);
+    const backups = item.backup_url || item.backupUrl;
+    if (Array.isArray(backups)) urls.push(...backups);
+    else if (backups) urls.push(backups);
+    return [...new Set(urls)].filter(isDownloadableCdnUrl)
+      .sort((a, b) => urlScore(b) - urlScore(a));
+  }
+
+  function collectRawStreamUrls(item) {
+    if (!item) return [];
+    const urls = [];
+    const main = item.baseUrl || item.base_url;
+    if (main) urls.push(main);
+    const backups = item.backupUrl || item.backup_url;
+    if (Array.isArray(backups)) urls.push(...backups);
+    else if (backups) urls.push(backups);
+    return [...new Set(urls.filter(Boolean))];
+  }
+
+  function extractStreamUrls(item) {
+    const raw = collectRawStreamUrls(item);
+    const preferred = raw.filter(isDownloadableCdnUrl)
+      .sort((a, b) => urlScore(b) - urlScore(a));
+    if (preferred.length) return preferred;
+    // 登录后常只给 akamaized / mcdn：先留下，后面改写到国内镜像
+    return raw.filter(isRewriteableStreamUrl);
+  }
+
+  function asAudioList(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (value.baseUrl || value.base_url || value.backupUrl || value.backup_url) return [value];
+    if (value.audio) return asAudioList(value.audio);
+    return [];
+  }
+
+  /** dash.audio + flac.audio + dolby.audio，按音质 id 从高到低 */
+  function collectAudioItems(dash) {
+    const items = [
+      ...asAudioList(dash?.audio),
+      ...asAudioList(dash?.flac),
+      ...asAudioList(dash?.dolby)
+    ];
+    const seen = new Set();
+    const uniq = [];
+    for (const item of items) {
+      const key = String(item.id || item.baseUrl || item.base_url || '');
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      uniq.push(item);
+    }
+    const aac = (item) => /^mp4a/i.test(item.codecs || '') || [30216, 30232, 30280].includes(Number(item.id));
+    return uniq.sort((a, b) => Number(aac(b)) - Number(aac(a)) || (Number(b.id) || 0) - (Number(a.id) || 0));
+  }
+
+  function collectAudioUrls(dash) {
+    const urls = [];
+    const seen = new Set();
+    for (const item of collectAudioItems(dash)) {
+      for (const url of extractStreamUrls(item)) {
+        if (seen.has(url)) continue;
+        seen.add(url);
+        urls.push(url);
+      }
+    }
+    return urls;
+  }
+
+  function pickBestStreamUrl(item) {
+    return extractStreamUrls(item)[0] || null;
+  }
+
+  function isBadHost(hostname) {
+    return BAD_HOST_PATTERNS.some((re) => re.test(hostname || ''));
+  }
+
+  function buildCdnCandidates(url, preferHost) {
+    const ordered = [];
+    const seen = new Set();
+
+    function push(u) {
+      if (!u || seen.has(u)) return;
+      seen.add(u);
+      ordered.push(u);
+    }
+
+    // 1. 播放器实际在用的节点（嗅探）最可靠
+    if (preferHost) {
+      const preferred = rewriteCdnUrl(url, preferHost);
+      push(preferred);
+    }
+
+    // 2. 已知可用镜像
+    for (const host of MIRRORS) {
+      push(rewriteCdnUrl(url, host));
+    }
+
+    // 3. 原始 URL：国内节点优先；akamaized 作为最后兜底（需 credentials omit）
+    try {
+      const host = new URL(url).hostname;
+      if (!isBadHost(host) || /akamaized/i.test(host)) push(url);
+    } catch { /* ignore */ }
+
+    return ordered;
+  }
+
+  function rememberMirrorHost(url) {
+    const host = hostFromUrl(url);
+    if (host) sessionMirrorCache.add(host);
+  }
+
+  function prioritizeCandidates(candidates) {
+    return [...candidates].sort((a, b) => {
+      const ca = sessionMirrorCache.has(hostFromUrl(a)) ? 1 : 0;
+      const cb = sessionMirrorCache.has(hostFromUrl(b)) ? 1 : 0;
+      return cb - ca;
+    });
+  }
+
+  async function probeCdn(url, controller = new AbortController()) {
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'omit',
+        referrer: location.href,
+        referrerPolicy: 'strict-origin-when-cross-origin',
+        headers: { Range: 'bytes=0-1' },
+        signal: controller.signal
+      });
+      return res.ok || res.status === 206;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+      // A server may ignore the two-byte Range. Never keep downloading a probe body.
+      controller.abort();
+    }
+  }
+
+  async function pickWorkingUrl(url, preferHost, excluded = new Set()) {
+    const candidates = [...new Set(prioritizeCandidates(buildCdnCandidates(url, preferHost)))]
+      .filter((candidate) => !excluded.has(candidate));
+    // Race a bounded batch: a healthy node must not wait for another node's
+    // timeout. Cancel losing probes immediately to release their connections.
+    for (let i = 0; i < candidates.length; i += PROBE_PARALLEL) {
+      const batch = candidates.slice(i, i + PROBE_PARALLEL);
+      const controllers = batch.map(() => new AbortController());
+      const hit = await new Promise((resolve) => {
+        let pending = batch.length;
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          controllers.forEach((controller) => controller.abort());
+          resolve(value);
+        };
+        batch.forEach((candidate, index) => {
+          probeCdn(candidate, controllers[index]).then((ok) => {
+            if (ok) finish(candidate);
+          }).catch(() => {}).finally(() => {
+            if (--pending === 0) finish(null);
+          });
+        });
+      });
+      if (hit) {
+        rememberMirrorHost(hit);
+        log('探测', '可用 ' + hostFromUrl(hit));
+      }
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  async function apiGet(apiPath) {
+    const controller = new AbortController();
+    try {
+      return await withStallTimeout((async () => {
+        const res = await fetch('https://api.bilibili.com' + apiPath, {
+          credentials: 'include',
+          referrer: API_REFERRER,
+          referrerPolicy: 'strict-origin-when-cross-origin',
+          signal: controller.signal
+        });
+        if (!res.ok) throw new Error('接口请求失败 HTTP ' + res.status);
+        const json = await res.json();
+        const guestWbiKeys = apiPath === '/x/web-interface/nav' && json.code === -101 && json.data?.wbi_img;
+        if (json.code !== 0 && !guestWbiKeys) throw new Error((json.message || '接口错误') + ' (API code=' + json.code + ')');
+        return json.data;
+      })(), controller, 20000);
+    } finally { controller.abort(); }
+  }
+
+  /** PGC 接口把成功数据放在 result，不是普通视频接口的 data。 */
+  async function pgcApiGet(apiPath) {
+    const controller = new AbortController();
+    try {
+      return await withStallTimeout((async () => {
+        const res = await fetch('https://api.bilibili.com' + apiPath, {
+          credentials: 'include', referrer: API_REFERRER,
+          referrerPolicy: 'strict-origin-when-cross-origin', signal: controller.signal
+        });
+        if (!res.ok) throw new Error('接口请求失败 HTTP ' + res.status);
+        const json = await res.json();
+        if (json.code !== 0) throw new Error((json.message || '接口错误') + ' (API code=' + json.code + ')');
+        if (!json.result) throw new Error('官方剧集接口未返回播放信息');
+        return json.result;
+      })(), controller, 20000);
+    } finally { controller.abort(); }
+  }
+
+  function pgcEpisodeList(season) {
+    const groups = [season?.episodes || []];
+    for (const section of season?.section || season?.sections || []) groups.push(section?.episodes || []);
+    const seen = new Set();
+    return groups.flat().filter((episode) => {
+      const id = String(episode?.id || episode?.ep_id || '');
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
+  function normalizePgcEpisode(episode, season, ordinal) {
+    const epId = String(episode?.id || episode?.ep_id || '');
+    const aid = String(episode?.aid || '');
+    const cid = String(episode?.cid || '');
+    if (!epId || !aid || !cid) return null;
+    const epTitle = String(episode.long_title || episode.share_copy || episode.title || `第 ${ordinal + 1} 集`).trim();
+    const seasonTitle = String(season?.season_title || season?.title || '官方剧集').trim();
+    return {
+      bvid: String(episode.bvid || `ep${epId}`), aid, cid, epId,
+      pgc: true, href: `https://www.bilibili.com/bangumi/play/ep${epId}`,
+      title: `${seasonTitle} - ${epTitle}`.trim(),
+      part: episode.title || String(ordinal + 1), partTitle: epTitle,
+      cover: String(episode.cover || season?.cover || ''),
+      duration: Number(episode.duration || 0) / (Number(episode.duration || 0) > 10000 ? 1000 : 1),
+      views: String(episode.stat?.view || ''), pubtime: Number(episode.pub_time || 0),
+      author: String(season?.up_info?.uname || season?.publisher?.name || ''),
+      sourceId: epId
+    };
+  }
+
+  async function resolvePgcVideo(id) {
+    const query = id.kind === 'epid' ? `ep_id=${id.value}` : `season_id=${id.value}`;
+    const season = await pgcApiGet('/pgc/view/web/season?' + query);
+    const episodes = pgcEpisodeList(season);
+    const currentId = id.kind === 'epid' ? String(id.value) : String(season.user_status?.progress?.last_ep_id || season.new_ep?.id || '');
+    // Never silently use episode one when the requested ep is absent.
+    const current = episodes.find((episode) => String(episode.id || episode.ep_id) === currentId)
+      || (id.kind === 'season' ? episodes[0] : null);
+    if (!current) throw new Error('未在官方剧集选集中找到当前分集');
+    const items = episodes.map((episode, index) => normalizePgcEpisode(episode, season, index)).filter(Boolean);
+    const currentInfo = normalizePgcEpisode(current, season, Math.max(0, episodes.indexOf(current)));
+    if (!currentInfo) throw new Error('官方剧集缺少视频标识');
+    return {
+      ...currentInfo,
+      pages: [{ cid: currentInfo.cid, page: 1, part: currentInfo.partTitle, duration: currentInfo.duration }],
+      pic: currentInfo.cover,
+      collection: { title: season.season_title || season.title || '官方剧集', total: items.length, items, hasMore: false, cursor: null, collection: true, pgc: true }
+    };
+  }
+
+  async function getPlayurl(aid, cid, qn, fnval, epId) {
+    const params = new URLSearchParams({ cid: String(cid), qn: String(qn), fnval: String(fnval), platform: 'pc' });
+    if (epId) {
+      params.set('ep_id', String(epId));
+      params.set('fourk', '1');
+      const result = await pgcApiGet('/pgc/player/web/playurl?' + params);
+      if (result.is_preview === 1 || result.is_preview === true) {
+        throw new Error('当前账号仅可试看，请登录具备完整观看权限的账号');
+      }
+      if (result.is_drm === true || result.is_drm === 1) {
+        throw new Error('该视频使用受保护的播放格式，暂不支持下载');
+      }
+      return result;
+    }
+    params.set('avid', String(aid));
+    if (Number(fnval) !== 1) { params.set('fnver', '0'); params.set('fourk', '1'); }
+    return apiGet('/x/player/playurl?' + params);
+  }
+
+  async function resolveVideo(href, pageIndex) {
+    const id = parseVideoId(href);
+    if (!id) throw new Error('无法识别视频 URL');
+    if (id.kind === 'epid' || id.kind === 'season') return resolvePgcVideo(id);
+
+    let data;
+    try {
+      if (id.kind === 'bvid') data = await apiGet('/x/web-interface/view?bvid=' + id.value);
+      else data = await apiGet('/x/web-interface/view?aid=' + id.value);
+    } catch (error) {
+      const pageData = window.__INITIAL_STATE__?.videoData;
+      const matches = id.kind === 'bvid'
+        ? String(pageData?.bvid || '').toLowerCase() === id.value.toLowerCase()
+        : String(pageData?.aid || '') === id.value;
+      if (!matches) throw error;
+      data = pageData;
+      log('信息', '视频接口暂不可用，使用当前页面已有的视频信息');
+    }
+
+    const pages = data.pages || [];
+    const page = pages[pageIndex] || pages[0];
+    const cid = page ? page.cid : data.cid;
+    let title = data.title || 'video';
+    if (pages.length > 1 && page) title += ` - P${page.page} ${page.part || ''}`;
+
+    return {
+      bvid: data.bvid,
+      aid: String(data.aid),
+      cid: String(cid),
+      title: title.trim(),
+      pages,
+      pic: data.pic || '',
+      author: data.owner?.name || data.staff || '',
+      view: data.stat?.view ?? 0,
+      pubdate: data.pubdate || 0,
+      duration: page?.duration || data.duration || 0,
+      collection: normalizeCollection(data.ugc_season)
+    };
+  }
+
+  function normalizeCollection(season) {
+    if (!season?.sections) return null;
+    const seen = new Set();
+    const items = [];
+    for (const section of season.sections) {
+      for (const episode of section.episodes || []) {
+        const arc = episode.arc || {};
+        const item = normalizeListItem({ ...arc, ...episode,
+          aid: episode.aid || arc.aid,
+          bvid: episode.bvid || arc.bvid,
+          cid: episode.cid || episode.page?.cid || arc.cid,
+          title: episode.title || arc.title,
+          cover: arc.pic || episode.pic,
+          duration: episode.page?.duration || arc.duration,
+          views: arc.stat?.view,
+          pubtime: arc.pubdate
+        });
+        if (item) {
+          item.author = arc.author?.name || arc.owner?.name || season.upper?.name || '';
+          item.collectionPages = Array.isArray(episode.pages) ? episode.pages : null;
+        }
+        if (!item || seen.has(item.bvid)) continue;
+        seen.add(item.bvid);
+        items.push(item);
+      }
+    }
+    return items.length ? { title: season.title || '视频合集', total: Number(season.ep_count) || items.length,
+      items, hasMore: false, cursor: null, collection: true } : null;
+  }
+
+  function normalizeListItem(item) {
+    if (!item) return null;
+    const bvid = String(item.bvid || item.bv_id || '').trim();
+    const aid = String(item.aid || item.oid || item.id || '').trim();
+    const firstPage = Array.isArray(item.pages) ? item.pages[0] : null;
+    const cid = String(item.cid || firstPage?.cid || firstPage?.id || '').trim();
+    if (!bvid || !aid || !cid) return null;
+    return {
+      bvid,
+      aid,
+      cid,
+      title: String(item.title || '未命名视频'),
+      cover: String(item.cover || ''),
+      duration: Number(firstPage?.duration || item.duration || 0),
+      views: String(item.views || item.cnt_info?.view_text_1 || item.cnt_info?.play || ''),
+      pubtime: Number(item.pubtime || item.ctime || 0),
+      sourceId: String(item.oid || item.id || aid)
+    };
+  }
+
+  function getListContext() {
+    const state = window.__INITIAL_STATE__ || {};
+    const playlist = state.playlist || {};
+    const type = Number(playlist.type);
+    const bizId = String(playlist.id || '').trim();
+    if (!type || !bizId) throw new Error('未识别到列表分页参数，请刷新 B 站页面后重试');
+    return {
+      type,
+      bizId,
+      tid: Number(state.tid) || 0,
+      sortField: String(state.sortFiled ?? 1),
+      desc: state.direction === true,
+      total: Number(state.listTotal || state.mediaListInfo?.media_count || 0),
+      title: String(state.mediaListInfo?.title || '视频列表'),
+      cursor: state.cursor?.oid && state.cursor?.bvid
+        ? { oid: String(state.cursor.oid), bvid: String(state.cursor.bvid) }
+        : null
+    };
+  }
+
+  function listApiPath(context, cursor) {
+    const query = new URLSearchParams({
+      out_referer: '',
+      mobi_app: 'web',
+      type: String(context.type),
+      biz_id: context.bizId,
+      ps: '20',
+      desc: String(context.desc),
+      sort_field: context.sortField,
+      tid: String(context.tid),
+      bvid: String(cursor?.bvid || ''),
+      oid: String(cursor?.oid || ''),
+      otype: '2',
+      with_current: 'false',
+      direction: 'true',
+      preview: '0',
+      use_pn: 'false',
+      pn: '1',
+      web_location: '333.1245'
+    });
+    return '/x/v2/medialist/resource/list?' + query.toString();
+  }
+
+  // WBI uses MD5 over the sorted query plus the daily mixin key.
+  function spaceMd5(value) {
+    const bytes = new TextEncoder().encode(value);
+    const size = Math.ceil((bytes.length + 9) / 64) * 64;
+    const buffer = new Uint8Array(size);
+    buffer.set(bytes);
+    buffer[bytes.length] = 128;
+    const view = new DataView(buffer.buffer);
+    view.setUint32(size - 8, bytes.length * 8, true);
+    view.setUint32(size - 4, Math.floor(bytes.length / 536870912), true);
+    const shifts = [[7, 12, 17, 22], [5, 9, 14, 20], [4, 11, 16, 23], [6, 10, 15, 21]];
+    let state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for (let offset = 0; offset < size; offset += 64) {
+      let [a, b, c, d] = state;
+      for (let i = 0; i < 64; i++) {
+        const round = Math.floor(i / 16);
+        const f = round === 0 ? (b & c) | (~b & d) : round === 1 ? (d & b) | (~d & c) : round === 2 ? b ^ c ^ d : c ^ (b | ~d);
+        const index = round === 0 ? i : round === 1 ? (5 * i + 1) % 16 : round === 2 ? (3 * i + 5) % 16 : (7 * i) % 16;
+        const sum = (a + f + Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) + view.getUint32(offset + index * 4, true)) | 0;
+        const shift = shifts[round][i % 4];
+        [a, b, c, d] = [d, (b + ((sum << shift) | (sum >>> (32 - shift)))) | 0, b, c];
+      }
+      state = state.map((word, index) => (word + [a, b, c, d][index]) | 0);
+    }
+    return state.map((word) => [0, 8, 16, 24].map((shift) => ((word >>> shift) & 255).toString(16).padStart(2, '0')).join('')).join('');
+  }
+
+  let spaceWbiKey = '';
+  async function loadSpaceCollections(cursor) {
+    const match = /^\/(\d+)\/lists\/?$/.exec(location.pathname);
+    if (location.hostname !== 'space.bilibili.com' || !match) throw new Error('当前不是合集汇总页');
+    const mid = match[1];
+    if (cursor?.mid && cursor.mid !== mid) throw new Error('UP 主已切换，请重新读取合集');
+    const pn = Math.max(1, Math.floor(Number(cursor?.pn) || 1));
+    const pageSize = 20;
+    const data = await apiGet('/x/polymer/web-space/seasons_series_list?' + new URLSearchParams({ mid, page_num: String(pn), page_size: String(pageSize) }));
+    const lists = data.items_lists;
+    if (!lists || !Array.isArray(lists.seasons_list) || !Array.isArray(lists.series_list)) throw new Error('无法读取合集目录');
+    const items = [];
+    for (const [type, groups] of [['season', lists.seasons_list], ['series', lists.series_list]]) {
+      for (const group of groups) {
+        const meta = group.meta || {};
+        const id = String(type === 'season' ? meta.season_id : meta.series_id);
+        if (!/^\d+$/.test(id)) continue;
+        items.push({ id, type, title: String(meta.name || '合集'), total: Math.max(0, Number(meta.total) || 0),
+          cover: String(meta.cover || group.archives?.[0]?.pic || ''),
+          url: 'https://space.bilibili.com/' + mid + '/lists/' + id + '?type=' + type });
+      }
+    }
+    const total = Number(data.page?.total);
+    return { items, hasMore: Number.isFinite(total) ? pn * pageSize < total : items.length >= pageSize, cursor: { mid, pn: pn + 1 } };
+  }
+
+  async function loadSpaceCollectionPage(cursor) {
+    const match = /^\/(\d+)\/lists\/(\d+)\/?$/.exec(location.pathname);
+    if (!match) throw new Error('请进入具体合集详情页后下载');
+    const [, mid, collectionId] = match;
+    const collectionType = new URL(location.href).searchParams.get('type') || 'season';
+    if (!['season', 'series'].includes(collectionType)) throw new Error('暂不支持此列表类型，请进入合集详情页');
+    if (cursor && (cursor.mid !== mid || cursor.collectionId !== collectionId || cursor.collectionType !== collectionType)) {
+      throw new Error('合集已切换，请重新读取列表');
+    }
+    const pn = Math.max(1, Math.floor(Number(cursor?.pn) || 1));
+    const pageSize = 30;
+    const params = new URLSearchParams(collectionType === 'season'
+      ? { mid, season_id: collectionId, sort_reverse: 'false', page_num: String(pn), page_size: String(pageSize) }
+      : { mid, series_id: collectionId, only_normal: 'true', sort: 'asc', pn: String(pn), ps: String(pageSize) });
+    const data = await apiGet((collectionType === 'season' ? '/x/polymer/web-space/seasons_archives_list?' : '/x/series/archives?') + params);
+    if (!Array.isArray(data.archives)) throw new Error('无法读取合集视频，请刷新页面后重试');
+    const items = data.archives.map(item => ({
+      bvid: String(item.bvid || ''), aid: String(item.aid || ''), cid: '',
+      title: String(item.title || '未命名视频'), cover: String(item.pic || ''),
+      duration: Number(item.duration) || 0, views: String(item.stat?.view || ''),
+      author: String(data.meta?.upper?.name || ''), pubtime: Number(item.pubdate) || 0
+    }));
+    if (items.some(item => !item.bvid || !/^\d+$/.test(item.aid))) throw new Error('合集条目缺少视频标识，请稍后重试');
+    const total = Number(data.page?.total ?? data.meta?.total);
+    if (!Number.isFinite(total) || total < 0) throw new Error('无法读取合集视频总数');
+    const hasMore = pn * pageSize < total;
+    if (hasMore && !items.length) throw new Error('合集分页返回空数据，请稍后重试');
+    const heading = document.querySelector('main h1, main h2, .space-main h1, .space-main h2');
+    return {
+      title: String(data.meta?.name || heading?.textContent?.trim() || '视频合集'),
+      total, items, hasMore, collection: true,
+      cursor: { mid, collectionId, collectionType, pn: pn + 1 }
+    };
+  }
+
+  function loadSpaceList(cursor) {
+    // Space collection pages must never fall back to all uploads.
+    if (/^\/\d+\/lists(?:\/|$)/.test(location.pathname)) return loadSpaceCollectionPage(cursor);
+    return loadSpacePage(cursor);
+  }
+
+  async function loadSpacePage(cursor) {
+    const mid = location.hostname === 'space.bilibili.com' && /^\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
+    if (!mid) throw new Error('当前页面不是 UP 主空间');
+    if (cursor?.mid && cursor.mid !== mid) throw new Error('UP 主已切换，请重新读取投稿');
+    if (!spaceWbiKey) {
+      const nav = await apiGet('/x/web-interface/nav');
+      const img = nav.wbi_img;
+      const raw = [img?.img_url, img?.sub_url].map((url) => String(url || '').split('/').pop().split('.')[0]).join('');
+      if (raw.length !== 64) throw new Error('无法读取投稿接口签名，请刷新页面后重试');
+      spaceWbiKey = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52].map((index) => raw[index]).join('').slice(0, 32);
+    }
+    const pn = Math.max(1, Number(cursor?.pn) || 1);
+    const params = { mid, pn, ps: 30, order: 'pubdate', tid: 0, keyword: '', platform: 'web', web_location: '333.1387', wts: Math.floor(Date.now() / 1000) };
+    const query = Object.keys(params).sort().map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(params[key]).replace(/[!'()*]/g, ''))}`).join('&');
+    let data;
+    try {
+      data = await apiGet('/x/space/wbi/arc/search?' + query + '&w_rid=' + spaceMd5(query + spaceWbiKey));
+    } catch (error) {
+      spaceWbiKey = '';
+      throw error;
+    }
+    const rawItems = data.list?.vlist;
+    if (!Array.isArray(rawItems) || !data.page) throw new Error('投稿列表返回格式异常，请稍后重试');
+    const items = rawItems.filter((item) => item.bvid && item.aid).map((item) => ({
+      bvid: String(item.bvid), aid: String(item.aid), cid: '', title: String(item.title || '未命名视频'),
+      author: String(item.author || ''), cover: String(item.pic || ''), views: String(item.play || ''),
+      pubtime: Number(item.created || 0), duration: String(item.length || '').split(':').reduce((seconds, part) => seconds * 60 + (Number(part) || 0), 0)
+    }));
+    if (items.length !== rawItems.length) throw new Error('部分投稿缺少视频标识，请稍后重试');
+    const total = Number(data.page.count);
+    if (!Number.isFinite(total) || total < 0) throw new Error('无法读取投稿总数，请稍后重试');
+    const hasMore = pn * 30 < total;
+    if (hasMore && !items.length) throw new Error('投稿分页返回空数据，请稍后重试');
+    return { title: `${items[0]?.author || 'UP 主'}的全部投稿`, total, items, hasMore, cursor: { mid, pn: pn + 1 }, space: true };
+  }
+
+  async function loadListPage(cursor) {
+    if (location.hostname === 'space.bilibili.com') return loadSpaceList(cursor);
+    const context = getListContext();
+    const data = await apiGet(listApiPath(context, cursor || context.cursor));
+    const rawItems = Array.isArray(data.media_list) ? data.media_list : [];
+    const items = rawItems.map(normalizeListItem).filter(Boolean);
+    const tail = rawItems[rawItems.length - 1];
+    return {
+      title: context.title,
+      total: Number(data.total_count || context.total || items.length),
+      items,
+      hasMore: data.has_more === true,
+      cursor: tail?.id && (tail.bv_id || tail.bvid)
+        ? { oid: String(tail.id), bvid: String(tail.bv_id || tail.bvid) }
+        : null
+    };
+  }
+
+  async function expandCollectionParts(collection, currentInfo) {
+    const groups = new Array(collection.items.length);
+    let next = 0;
+    let failure = null;
+    async function expandWorker() {
+      while (!failure && next < collection.items.length) {
+        const index = next++;
+        const item = collection.items[index];
+        try {
+          const pages = item.collectionPages?.length
+            ? item.collectionPages
+            : item.bvid === currentInfo.bvid && currentInfo.pages?.length
+              ? currentInfo.pages
+              : await apiGet('/x/player/pagelist?bvid=' + encodeURIComponent(item.bvid));
+          if (!Array.isArray(pages) || !pages.length || pages.some((page) => !page.cid)) {
+            throw new Error('未返回完整分 P 列表');
+          }
+          const { collectionPages, ...archive } = item;
+          groups[index] = pages.map((page, pageIndex) => ({
+            ...archive,
+            cid: String(page.cid),
+            listKey: `${item.bvid}:${page.cid}`,
+            pageIndex: Math.max(0, (Number(page.page) || pageIndex + 1) - 1),
+            part: Number(page.page) || pageIndex + 1,
+            partTitle: String(page.part || item.title),
+            title: pages.length > 1 ? `${item.title} - P${Number(page.page) || pageIndex + 1} ${page.part || ''}`.trim() : item.title,
+            duration: Number(page.duration) || item.duration,
+            partCount: pages.length
+          }));
+          log('合集', `已读取 ${index + 1}/${collection.items.length} 个投稿：${item.bvid} · ${pages.length} 个分 P`);
+        } catch (error) {
+          failure ||= new Error(`合集分 P 读取失败（${item.title}）：${error.message || error}`);
+        }
+      }
+    }
+    // Bound metadata requests; flatten after all workers finish to preserve order.
+    await Promise.all([expandWorker(), expandWorker()]);
+    if (failure) throw failure;
+    const seen = new Set();
+    const items = groups.flat().filter((item) => {
+      if (seen.has(item.listKey)) return false;
+      seen.add(item.listKey);
+      return true;
+    });
+    return { ...collection, items, total: items.length, archiveTotal: collection.items.length };
+  }
+
+  async function resolveList(cursor) {
+    if (location.hostname === 'space.bilibili.com') return loadSpaceList(cursor || null);
+    if (/^\/bangumi\/play\/(?:ep|ss)\d+/i.test(location.pathname)) {
+      const info = await resolveVideo(location.href, 0);
+      if (!info.collection) throw new Error('当前官方剧集未提供可下载的选集');
+      return info.collection;
+    }
+    if (/^\/video\//.test(location.pathname)) {
+      const info = await resolveVideo(location.href, 0);
+      if (!info.collection) throw new Error('当前视频未提供可下载的合集条目');
+      return expandCollectionParts(info.collection, info);
+    }
+    const state = window.__INITIAL_STATE__ || {};
+    const resources = Array.isArray(state.resourceList) ? state.resourceList : [];
+    const items = resources.map(normalizeListItem).filter(Boolean);
+    const context = getListContext();
+    const tail = resources[resources.length - 1];
+    return {
+      title: context.title,
+      total: context.total || items.length,
+      items,
+      hasMore: true,
+      cursor: tail?.oid && tail?.bvid
+        ? { oid: String(tail.oid), bvid: String(tail.bvid) }
+        : context.cursor
+    };
+  }
+
+  function isLoggedIn() {
+    return /(?:^|;\s*)DedeUserID=\d+/i.test(document.cookie || '');
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    if (n >= 1024) return Math.round(n / 1024) + ' KB';
+    return n + ' B';
+  }
+
+  function buildLoginHint(maxDashQn) {
+    const loggedIn = isLoggedIn();
+    if (!loggedIn && maxDashQn <= 64) {
+      return '未登录时 B 站通常仅提供低清。登录并刷新页面后，可尝试更高清晰度';
+    }
+    if (!loggedIn && maxDashQn > 0 && maxDashQn < 80) {
+      return '登录 B 站账号后，可能解锁 1080P 等更高清晰度（视视频与账号而定）';
+    }
+    if (loggedIn && maxDashQn > 0 && maxDashQn <= 64) {
+      return '当前账号在该视频最高约 ' + (QUALITY_MAP[maxDashQn] || maxDashQn + 'P') + '，大会员可解锁更高（若片源支持）';
+    }
+    return null;
+  }
+
+  async function estimateDownloadSize(aid, cid, qn, durationSec, streamPreference = 'high-bitrate', epId = '') {
+    const dur = Math.max(Number(durationSec) || 0, 1);
+
+    if (qn <= 64) {
+      try {
+        const durl = await getPlayurl(aid, cid, qn, 1, epId);
+        if (durl.durl?.[0]?.size) {
+          const sizeBytes = durl.durl[0].size;
+          return {
+            sizeBytes,
+            sizeLabel: formatSize(sizeBytes),
+            estimateNote: '单文件含音视频'
+          };
+        }
+      } catch { /* fallback to dash estimate */ }
+    }
+
+    try {
+      const dash = await getPlayurl(aid, cid, qn, DASH_FNVAL, epId);
+      if (dash.dash?.video?.length) {
+        const videos = dash.dash.video.filter((v) => Number(v.id) === Number(qn));
+        const video = selectVideoStream(videos, streamPreference) || dash.dash.video[0];
+        const audio = collectAudioItems(dash.dash)[0];
+        let bytes = 0;
+        if (video?.bandwidth) bytes += (video.bandwidth * dur) / 8;
+        if (audio?.bandwidth) bytes += (audio.bandwidth * dur) / 8;
+        if (bytes > 0) {
+          return {
+            sizeBytes: Math.round(bytes),
+            sizeLabel: formatSize(bytes),
+            estimateNote: '约数，仅供参考'
+          };
+        }
+      }
+      if (dash.durl?.[0]?.size) {
+        return {
+          sizeBytes: dash.durl[0].size,
+          sizeLabel: formatSize(dash.durl[0].size),
+          estimateNote: null
+        };
+      }
+    } catch { /* ignore */ }
+
+    return { sizeBytes: 0, sizeLabel: '未知', estimateNote: null };
+  }
+
+  function actualQualityLabel(data, qn) {
+    const format = data.support_formats?.find(item => Number(item.quality) === Number(qn));
+    return format?.new_description || QUALITY_MAP[qn] || `${qn}P`;
+  }
+
+  function downloadableSingle(data) {
+    return Number(data?.quality) > 0 && /mp4/i.test(data?.format || '')
+      && data.durl?.length === 1 && extractDurlUrls(data.durl[0]).length > 0;
+  }
+
+  async function getQualities(aid, cid, epId = '') {
+    const data = await getPlayurl(aid, cid, 127, DASH_FNVAL, epId);
+    const actual = new Map();
+    for (const video of data.dash?.video || []) {
+      const qn = Number(video.id);
+      if (qn > 0 && pickBestStreamUrl(video)) actual.set(qn, { qn, label: actualQualityLabel(data, qn), mode: 'dash' });
+    }
+    if (!actual.size) {
+      // MP4 and legacy FLV can expose different qualities. Probe the MP4
+      // format and use returned quality IDs, never the requested IDs.
+      const single = await getPlayurl(aid, cid, 127, 1, epId);
+      const remember = result => {
+        if (!downloadableSingle(result)) return;
+        const qn = Number(result.quality);
+        actual.set(qn, { qn, label: actualQualityLabel(result, qn), mode: 'durl' });
+      };
+      remember(single);
+      const candidates = [...new Set((single.support_formats || []).map(fmt => Number(fmt.quality)))]
+        .filter(qn => qn > 0 && qn !== Number(single.quality));
+      // Bound API pressure even when an endpoint advertises many formats.
+      let cursor = 0;
+      async function probe() {
+        while (cursor < candidates.length) {
+          const qn = candidates[cursor++];
+          try { remember(await getPlayurl(aid, cid, qn, 1, epId)); }
+          catch { /* Failed probes are not advertised as downloadable. */ }
+        }
+      }
+      await Promise.all([probe(), probe()]);
+    }
+    const qualities = [...actual.values()].sort((a, b) => b.qn - a.qn);
+    if (!qualities.length) throw new Error('该视频目前未返回可下载的 MP4 或 DASH 片源');
+    const preferred = qualities.filter(q => q.qn > 16);
+    const visible = preferred.length ? preferred : qualities;
+    return { qualities: visible, maxQn: qualities[0].qn, maxLabel: qualities[0].label,
+      loginHint: buildLoginHint(qualities[0].qn) };
+  }
+
+  function isAvcVideoStream(item) {
+    return Number(item?.codecid) === 7 || /^avc/i.test(item?.codecs || '');
+  }
+
+  function streamBandwidth(item) {
+    return Math.max(0, Number(item?.bandwidth) || 0);
+  }
+
+  // B 站可能为同一清晰度返回多种编码或码率。默认以片源声明码率排序，
+  // 不做转码；“兼容优先”才把 AVC 编码放在前面。
+  function selectVideoStream(items, streamPreference = 'high-bitrate') {
+    const candidates = (items || []).filter((item) => pickBestStreamUrl(item));
+    return candidates.sort((a, b) => {
+      const bitrateDelta = streamBandwidth(b) - streamBandwidth(a);
+      const codecDelta = Number(isAvcVideoStream(b)) - Number(isAvcVideoStream(a));
+      if (streamPreference === 'compatible') {
+        return codecDelta || bitrateDelta || urlScore(pickBestStreamUrl(b)) - urlScore(pickBestStreamUrl(a));
+      }
+      return bitrateDelta || codecDelta || urlScore(pickBestStreamUrl(b)) - urlScore(pickBestStreamUrl(a));
+    })[0] || null;
+  }
+
+  async function getSingleFileStreams(aid, cid, qn, epId = '') {
+    const data = await getPlayurl(aid, cid, qn, 1, epId);
+    if (data.durl?.length > 1) throw new Error('该片源由多个旧格式片段组成，请切换清晰度后重试');
+    const urls = data.durl?.length === 1 ? extractDurlUrls(data.durl[0]) : [];
+    if (!urls.length) throw new Error('无法获取单文件播放流');
+    if (!downloadableSingle(data)) throw new Error('该片源不是可下载的单文件 MP4');
+    return { type: 'durl', urls, actualQn: Number(data.quality), actualLabel: actualQualityLabel(data, data.quality) };
+  }
+
+  async function getStreams(aid, cid, qn, streamPreference = 'high-bitrate', epId = '') {
+    // Prefer the same DASH source used by the player, including 720P and below.
+    // Legacy single-file sources can fail even while the DASH source plays.
+    try {
+      const dash = await getPlayurl(aid, cid, qn, DASH_FNVAL, epId);
+      if (dash.dash?.video?.length) {
+        const available = dash.dash.video.filter(v => Number(v.id) > 0 && pickBestStreamUrl(v));
+        const exact = available.filter(v => Number(v.id) === Number(qn));
+        const lower = available.filter(v => Number(v.id) <= Number(qn)).sort((a, b) => Number(b.id) - Number(a.id));
+        const actualQn = exact.length ? Number(qn) : Number(lower[0]?.id || available.slice().sort((a, b) => Number(a.id) - Number(b.id))[0]?.id);
+        const videos = available.filter(v => Number(v.id) === actualQn);
+        const video = selectVideoStream(videos, streamPreference);
+        const audioUrls = collectAudioUrls(dash.dash);
+        const videoUrl = pickBestStreamUrl(video);
+        const audioUrl = audioUrls[0] || null;
+        if (!videoUrl) throw new Error('无法解析视频 CDN 地址');
+        log('步骤3', `DASH ${qn}P ${streamPreference === 'compatible' ? '兼容优先' : '高码率优先'} · 视频=${hostFromUrl(videoUrl)} ${Math.round(streamBandwidth(video) / 1000)}kbps · 音频=${audioUrl ? hostFromUrl(audioUrl) : '无'} (${audioUrls.length}路)`);
+        return {
+          type: 'dash', actualQn: Number(video.id), actualLabel: actualQualityLabel(dash, video.id),
+          video: videoUrl,
+          videoUrls: extractStreamUrls(video),
+          audio: audioUrl,
+          audioUrls
+        };
+      }
+    } catch (e) {
+      log('步骤3', 'DASH 获取失败: ' + e.message);
+    }
+
+    return getSingleFileStreams(aid, cid, qn, epId);
+  }
+
+  function safeFilename(name, fallback) {
+    const cleaned = (name || fallback || '').replace(/[\\/:*?"<>|~]/g, '_').trim();
+    const chars = Array.from(cleaned); // 按 Unicode 码点，避免截断 emoji/代理对
+    return chars.length <= 120 ? cleaned : chars.slice(0, 120).join('');
+  }
+
+  /** 仅下载音频轨（DASH 音频即 AAC fMP4，可直接存为 .m4a） */
+  async function getAudioStreams(aid, cid, epId = '') {
+    const dash = await getPlayurl(aid, cid, 80, DASH_FNVAL, epId);
+    const streams = collectAudioItems(dash.dash).map((audio) => ({
+      urls: extractStreamUrls(audio),
+      id: audio.id,
+      codecs: audio.codecs || ''
+    })).filter((stream) => stream.urls.length);
+    if (!streams.length) throw new Error('该视频无独立音频轨');
+    return streams;
+  }
+
+  async function handleAudioOnly(aid, cid, title, jobId, filenameBase, epId = '') {
+    const session = createSession(jobId);
+    try {
+      if (session.cancelled) throw new Error('下载已取消');
+      const base = safeFilename(filenameBase || title, 'audio');
+      const streams = await getAudioStreams(aid, cid, epId);
+      const urls = [];
+      const seen = new Set();
+      for (const stream of streams) {
+        for (const url of stream.urls) {
+          if (seen.has(url)) continue;
+          seen.add(url);
+          urls.push(url);
+        }
+      }
+      if (!urls.length) throw new Error('无法解析音频 CDN 地址');
+      log('步骤3', `音频候选 ${streams.length} 档 / ${urls.length} 路`);
+      const sniffed = sniffPlayingUrls();
+      const preferHost = hostFromUrl(sniffed.audio || sniffed.video);
+      sendProgress(session, 'audio', 0);
+      const blob = await pageDownload(session, urls, (p) => {
+        sendProgress(session, 'audio', p.percent, { received: p.received, total: p.total });
+      }, preferHost, 'audio');
+      sendProgress(session, 'save', 100);
+      throwIfCancelled(session);
+      return { audioOnly: true, blob, filename: base + '.m4a', jobId: session.jobId };
+    } finally {
+      destroySession(session.jobId);
+    }
+  }
+
+  /** 音频模式体积预估（仅音频轨带宽） */
+  async function estimateAudioSize(aid, cid, durationSec, epId = '') {
+    const dur = Math.max(Number(durationSec) || 0, 1);
+    try {
+      const dash = await getPlayurl(aid, cid, 80, DASH_FNVAL, epId);
+      const audio = collectAudioItems(dash.dash)[0];
+      if (audio?.bandwidth) {
+        const bytes = Math.round((audio.bandwidth * dur) / 8);
+        return { sizeBytes: bytes, sizeLabel: formatSize(bytes), estimateNote: '约数，仅供参考' };
+      }
+    } catch { /* ignore */ }
+    return { sizeBytes: 0, sizeLabel: '未知', estimateNote: null };
+  }
+
+  /** 从页面已播放的资源中嗅探 CDN 地址（兜底） */
+  function sniffPlayingUrls() {
+    const entries = performance.getEntriesByType('resource') || [];
+    const videos = [];
+    const audios = [];
+    for (const e of entries) {
+      const u = e.name || '';
+      if (!isDownloadableCdnUrl(u)) continue;
+      if (/[^\d]302\d{2}(?:[^\d]|$)/.test(u) || u.includes('-1-302')) audios.push(u);
+      else if (u.includes('.m4s') || u.includes('.flv') || u.includes('upgcxcode')) videos.push(u);
+    }
+    return { video: videos.pop(), audio: audios.pop() };
+  }
+
+  function hostFromUrl(url) {
+    try { return new URL(url).hostname; } catch { return null; }
+  }
+
+  /** 并行任务：每个 jobId 独立 session（暂停/取消互不影响） */
+  const sessions = new Map();
+  const cancelledBeforeStart = new Set();
+  const mergeWaiters = new Map();
+  let jobSeq = 0;
+
+  function createSession(jobId) {
+    const id = jobId || `job-${Date.now()}-${++jobSeq}`;
+    const session = {
+      jobId: id,
+      paused: false,
+      pauseEpoch: 0,
+      cancelled: cancelledBeforeStart.delete(id),
+      abortController: null,
+      controllers: {},
+      trackProgress: {},
+      progressReportAt: {},
+      pauseWait: null,
+      merging: false,
+      lastProgress: null
+    };
+    sessions.set(id, session);
+    return session;
+  }
+
+  function destroySession(jobId) {
+    const s = sessions.get(jobId);
+    if (!s) return;
+    s.cancelled = true;
+    s.pauseWait?.resolve();
+    s.pauseWait = null;
+    Object.values(s.controllers).forEach((c) => c?.abort());
+    s.abortController?.abort();
+    sessions.delete(jobId);
+    cancelledBeforeStart.delete(jobId);
+    const waiter = mergeWaiters.get(jobId);
+    if (waiter) {
+      mergeWaiters.delete(jobId);
+      waiter.reject(new Error('下载已取消'));
+    }
+  }
+
+  function abortSessionControllers(session) {
+    Object.values(session.controllers).forEach((c) => c?.abort());
+    session.abortController?.abort();
+  }
+
+  function getDisplayProgress(session) {
+    const vp = session.trackProgress.video;
+    if (vp?.total && vp.received < vp.total) {
+      return {
+        received: vp.received,
+        total: vp.total,
+        percent: Math.round((vp.received / vp.total) * 100)
+      };
+    }
+    const ap = session.trackProgress.audio;
+    if (ap) {
+      return {
+        received: ap.received || 0,
+        total: ap.total || 0,
+        percent: ap.total ? Math.round((ap.received / ap.total) * 100) : 0
+      };
+    }
+    let received = 0;
+    let total = 0;
+    for (const p of Object.values(session.trackProgress)) {
+      received += p.received || 0;
+      total += p.total || 0;
+    }
+    return {
+      received,
+      total,
+      percent: total ? Math.round((received / total) * 100) : 0
+    };
+  }
+
+  function pauseDownloadControl(jobId) {
+    const targets = jobId ? [sessions.get(jobId)].filter(Boolean) : [...sessions.values()];
+    for (const session of targets) {
+      if (session.cancelled || session.paused || session.merging) continue;
+      session.paused = true;
+      session.pauseEpoch++;
+      const p = getDisplayProgress(session);
+      sendProgress(session, 'paused', p.percent || 0, { received: p.received, total: p.total });
+      abortSessionControllers(session);
+    }
+  }
+
+  function resumeDownloadControl(jobId) {
+    const targets = jobId ? [sessions.get(jobId)].filter(Boolean) : [...sessions.values()];
+    for (const session of targets) {
+      if (session.cancelled || !session.paused) continue;
+      session.paused = false;
+      if (session.pauseWait) {
+        session.pauseWait.resolve();
+        session.pauseWait = null;
+      }
+    }
+  }
+
+  function cancelDownloadControl(jobId) {
+    if (jobId && !sessions.has(jobId)) cancelledBeforeStart.add(jobId);
+    if (cancelledBeforeStart.size > 256) cancelledBeforeStart.delete(cancelledBeforeStart.values().next().value);
+    const targets = jobId ? [sessions.get(jobId)].filter(Boolean) : [...sessions.values()];
+    for (const session of targets) {
+      session.cancelled = true;
+      session.paused = false;
+      if (session.pauseWait) {
+        session.pauseWait.resolve();
+        session.pauseWait = null;
+      }
+      abortSessionControllers(session);
+      const mergeWaiter = mergeWaiters.get(session.jobId);
+      if (mergeWaiter) {
+        mergeWaiters.delete(session.jobId);
+        mergeWaiter.reject(new Error('下载已取消'));
+      }
+      window.postMessage({ source: AGENT, type: 'MERGE_CANCEL', jobId: session.jobId }, '*');
+    }
+  }
+
+  function waitWhilePaused(session) {
+    if (!session.paused || session.cancelled) return Promise.resolve();
+    // Video and audio can both be waiting: share one gate instead of overwriting a resolver.
+    if (!session.pauseWait) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      session.pauseWait = { resolve, promise };
+    }
+    return session.pauseWait.promise;
+  }
+
+  function throwIfCancelled(session) {
+    if (session.cancelled) throw new Error('下载已取消');
+  }
+
+  function reportDownloadProgress(session, trackId, progress, onProgress, force = false) {
+    session.trackProgress[trackId] = progress;
+    session.lastProgress = progress;
+    const now = performance.now();
+    const last = session.progressReportAt[trackId] || 0;
+    if (!force && now - last < PROGRESS_REPORT_INTERVAL_MS) return;
+    session.progressReportAt[trackId] = now;
+    onProgress?.(progress);
+  }
+
+  function formatDownloadError(err) {
+    const msg = err?.message || String(err);
+    if (msg === '下载已取消') return msg;
+    if (/合并库|合并模块|mp4-remux|BiliM4sMux|合并组件/.test(msg)) {
+      return '请刷新页面后重试';
+    }
+    if (/无视频流|请先点击播放|请先播放/.test(msg)) {
+      return '请先播放视频 5～10 秒，再点下载';
+    }
+    if (/文件过大/.test(msg)) {
+      return '文件较大，下载时电脑可能会卡住，仍可继续';
+    }
+    if (/403|CDN|镜像|探测|HTTP 4|所有 CDN|无有效 CDN/.test(msg)) {
+      return '下载失败。请先播放 5～10 秒，或改选 720P 后重试';
+    }
+    if (/超时/.test(msg)) {
+      return '请求超时，请刷新页面后重试';
+    }
+    return msg;
+  }
+
+  function formatAgentError(err, type) {
+    if (type !== 'RESOLVE_VIDEO' && type !== 'GET_QUALITIES') return formatDownloadError(err);
+    const msg = err?.message || String(err);
+    if (/HTTP (?:403|412)|API code=-403/.test(msg)) {
+      return 'B 站视频接口暂不可用，请稍后刷新页面重试';
+    }
+    if (/超时/.test(msg)) return '视频信息读取超时，请刷新页面重试';
+    return msg;
+  }
+
+  async function pageDownload(session, urls, onProgress, preferHost, trackId = 'default') {
+    const list = (Array.isArray(urls) ? urls : [urls])
+      .filter((u) => isDownloadableCdnUrl(u) || isRewriteableStreamUrl(u));
+    if (!list.length) throw new Error('无有效 CDN 地址');
+
+    let lastErr;
+    for (const src of list) {
+      let chunks = [];
+      let received = 0;
+      let total = 0;
+      const attemptedWorking = new Set();
+
+      // Resume only on the same URL. Different mirrors can serve different
+      // encodings/box layouts even for the same track and byte length.
+      while (true) {
+        let working = null;
+        try {
+          await waitWhilePaused(session);
+          throwIfCancelled(session);
+          working = await pickWorkingUrl(src, preferHost, attemptedWorking);
+          if (!working || attemptedWorking.has(working)) {
+            // Keep the transfer error (for example, an integrity/range error)
+            // instead of masking it as a generic probe failure.
+            lastErr ||= new Error('CDN 探测失败: ' + hostFromUrl(src));
+            break;
+          }
+          attemptedWorking.add(working);
+
+          chunks = [];
+          received = 0;
+          total = 0;
+
+          rememberMirrorHost(working);
+          log('下载', '使用 ' + hostFromUrl(working));
+
+          while (true) {
+            await waitWhilePaused(session);
+            throwIfCancelled(session);
+            const pauseEpoch = session.pauseEpoch;
+            session.abortController = new AbortController();
+            session.controllers[trackId] = session.abortController;
+            const headers = {};
+            if (received > 0) headers.Range = `bytes=${received}-`;
+
+            let res;
+            try {
+              res = await withStallTimeout(fetch(working, {
+                credentials: 'omit',
+                referrer: location.href,
+                referrerPolicy: 'strict-origin-when-cross-origin',
+                headers,
+                signal: session.abortController.signal
+              }), session.controllers[trackId], 30000);
+            } catch (e) {
+              if (session.cancelled) throw new Error('下载已取消');
+              if (session.paused || session.pauseEpoch !== pauseEpoch) {
+                await waitWhilePaused(session);
+                throwIfCancelled(session);
+                continue;
+              }
+              throw e;
+            }
+
+            if (!res.ok && !(received > 0 && res.status === 206)) {
+              throw new Error('HTTP ' + res.status + ' (' + hostFromUrl(working) + ')');
+            }
+
+            if (received > 0 && res.status === 200) {
+              // Range ignored: restart, never append a full response to the partial file.
+              chunks = [];
+              received = 0;
+              total = 0;
+            }
+            if (res.status === 206) {
+              const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('content-range') || '');
+              if (!range || Number(range[1]) !== received || Number(range[2]) < received ||
+                  Number(range[2]) >= Number(range[3]) || (total && total !== Number(range[3]))) {
+                await res.body?.cancel();
+                throw new Error('下载范围不一致，请重试');
+              }
+              total = Number(range[3]);
+            } else if (received === 0) {
+              total = Number(res.headers.get('content-length')) || 0;
+            }
+
+            const reader = res.body.getReader();
+            let needResume = false;
+
+            try {
+              while (true) {
+                throwIfCancelled(session);
+                let readResult;
+                try {
+                  readResult = await withStallTimeout(reader.read(), session.controllers[trackId], 60000);
+                } catch (e) {
+                  if (session.cancelled) throw new Error('下载已取消');
+                  if (session.paused || session.pauseEpoch !== pauseEpoch) {
+                    needResume = true;
+                    break;
+                  }
+                  throw e;
+                }
+
+                const { done, value } = readResult;
+                if (done) {
+                  if (session.paused || session.pauseEpoch !== pauseEpoch) needResume = true;
+                  break;
+                }
+
+                chunks.push(value);
+                received += value.length;
+                const progress = { received, total, percent: total ? Math.round((received / total) * 100) : 0 };
+                reportDownloadProgress(session, trackId, progress, onProgress);
+              }
+            } finally {
+              try { reader.releaseLock(); } catch { /* ignore */ }
+            }
+
+            if (needResume) {
+              await waitWhilePaused(session);
+              throwIfCancelled(session);
+              continue;
+            }
+
+            if (total && received !== total) throw new Error('下载文件不完整，请重试');
+
+            reportDownloadProgress(session, trackId, { received, total, percent: total ? Math.round((received / total) * 100) : 0 }, onProgress, true);
+            log('下载', '成功 ' + (received / 1024 / 1024).toFixed(1) + 'MB');
+            if (received < 1024) throw new Error('下载内容为空');
+            return new Blob(chunks);
+          }
+        } catch (e) {
+          if (e.message === '下载已取消') throw e;
+          lastErr = e;
+          log('下载', '失败 ' + (e.message || e));
+          // All candidates are finite. On a transport failure, keep the partial
+          // bytes and let the next candidate resume it with Range.
+          if (attemptedWorking.size && !session.paused) {
+            log('下载', '切换 CDN 后重新下载该轨道，避免混用片源');
+            continue;
+          }
+          break;
+        } finally {
+          session.controllers[trackId]?.abort();
+        }
+      }
+    }
+    throw new Error(formatDownloadError(lastErr || { message: '所有 CDN 镜像均不可用' }));
+  }
+
+  function withStallTimeout(promise, controller, milliseconds) {
+    let timer;
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error('网络长时间无响应，请重试'));
+        controller?.abort();
+      }, milliseconds);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  function mergeM4sInWorker(videoBlob, audioBlob, session) {
+    if (session?.cancelled) return Promise.reject(new Error('下载已取消'));
+    return new Promise((resolve, reject) => {
+      const jobId = session?.jobId;
+      if (!jobId) {
+        reject(new Error('下载任务不存在'));
+        return;
+      }
+      mergeWaiters.set(jobId, { resolve, reject });
+      window.postMessage({
+        source: AGENT,
+        type: 'MERGE_REQUEST',
+        jobId,
+        videoBlob,
+        audioBlob
+      }, '*');
+      // Blob 已由 postMessage 交给内容脚本/Worker；不在等待期间额外保留引用。
+      videoBlob = null;
+      audioBlob = null;
+    });
+  }
+
+  async function mergeM4sFallback(videoBlob, audioBlob, session) {
+    if (!videoBlob?.size) throw new Error('视频数据为空');
+    if (!audioBlob?.size) throw new Error('音频数据为空');
+
+    const totalMB = (videoBlob.size + audioBlob.size) / 1024 / 1024;
+
+    if (typeof window.mp4Remux !== 'function') {
+      throw new Error('合并库未加载，请刷新页面重试');
+    }
+    if (!window.BiliM4sMux?.mergeM4s) {
+      throw new Error('合并模块未加载，请刷新页面重试');
+    }
+
+    log('合并', `纯JS合并中 (${totalMB.toFixed(1)}MB)...`);
+    const t0 = Date.now();
+    let mergedInputBytes = 0;
+    let lastReportedBytes = 0;
+    const mergeBytes = videoBlob.size + audioBlob.size;
+    const reportEveryBytes = 16 * 1024 * 1024;
+    const blob = await window.BiliM4sMux.mergeM4s(videoBlob, audioBlob, window.mp4Remux, {
+      shouldCancel: () => Boolean(session?.cancelled),
+      onChunk: (chunkBytes) => {
+        mergedInputBytes = Math.min(mergeBytes, mergedInputBytes + chunkBytes);
+        if (mergedInputBytes - lastReportedBytes < reportEveryBytes && mergedInputBytes < mergeBytes) return;
+        lastReportedBytes = mergedInputBytes;
+        if (session && !session.cancelled) sendProgress(session, 'merge', Math.round((mergedInputBytes / mergeBytes) * 100), {
+          received: mergedInputBytes,
+          total: mergeBytes
+        });
+      }
+    });
+    log('合并', `完成 ${(blob.size / 1024 / 1024).toFixed(1)}MB (${Date.now() - t0}ms)`);
+    return blob;
+  }
+
+  async function mergeM4sInPage(videoBlob, audioBlob, session) {
+    try {
+      return await mergeM4sInWorker(videoBlob, audioBlob, session);
+    } catch (error) {
+      // Worker 被企业策略或页面环境阻止时，仍使用已分段、可取消的主线程实现兜底。
+      if (!/^WORKER_UNAVAILABLE:/.test(String(error?.message || error))) throw error;
+      if (videoBlob.size + audioBlob.size >= 512 * 1024 * 1024) {
+        throw new Error('合成 Worker 不可用。为避免页面卡顿，已停止大文件合成；请刷新页面或检查浏览器扩展策略后重试');
+      }
+      log('合并', 'Worker 不可用，改用兼容合成模式');
+      return mergeM4sFallback(videoBlob, audioBlob, session);
+    }
+  }
+
+  function sendProgress(session, step, percent, extra) {
+    reply(null, {
+      type: 'PROGRESS',
+      jobId: session?.jobId,
+      step,
+      percent,
+      ...extra
+    });
+  }
+
+  async function handleDownload(aid, cid, qn, title, jobId, filenameBase, streamPreference = 'high-bitrate', includeAudioBlob = false, epId = '') {
+    const session = createSession(jobId);
+    try {
+      if (session.cancelled) throw new Error('下载已取消');
+      const base = safeFilename(filenameBase || title, 'video');
+      const streams = await getStreams(aid, cid, qn, streamPreference, epId);
+
+      async function saveSingleFile(singleFile) {
+        const urls = singleFile.urls || [];
+        if (!urls.length) throw new Error('无有效 CDN 地址');
+        const sniffed = sniffPlayingUrls();
+        const preferHost = hostFromUrl(sniffed.video);
+        sendProgress(session, 'download', 0);
+        const blob = await pageDownload(session, urls, (p) => {
+          sendProgress(session, 'download', p.percent, { received: p.received, total: p.total });
+        }, preferHost);
+        sendProgress(session, 'save', 100);
+        throwIfCancelled(session);
+        const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+        if (String.fromCharCode(...header.slice(4, 8)) !== 'ftyp') throw new Error('片源不是 MP4 文件，请切换清晰度后重试');
+        return { dash: false, blob, filename: base + '.mp4', jobId: session.jobId, actualQn: singleFile.actualQn, actualLabel: singleFile.actualLabel };
+      }
+
+      if (streams.type === 'durl') return await saveSingleFile(streams);
+
+      const sniffed = sniffPlayingUrls();
+      const preferHost = hostFromUrl(sniffed.video || sniffed.audio);
+      let videoUrl = streams.video;
+      let audioUrl = streams.audio;
+      const videoUrls = streams.videoUrls?.length
+        ? streams.videoUrls
+        : [videoUrl].filter(Boolean);
+      const audioUrls = streams.audioUrls?.length
+        ? streams.audioUrls
+        : [audioUrl].filter(Boolean);
+
+      if (!videoUrl) throw new Error('无视频流，请先点击播放视频再下载');
+      if (preferHost) log('步骤3', '嗅探到播放节点 ' + preferHost);
+
+      const vTrack = { received: 0, total: 0, done: false };
+      const aTrack = { received: 0, total: 0, done: false };
+      const hasAudio = audioUrls.length > 0;
+
+      function sendDashProgress() {
+        const vPct = vTrack.total
+          ? Math.min(100, Math.round((vTrack.received / vTrack.total) * 100))
+          : 0;
+
+        if (!vTrack.done) {
+          sendProgress(session, 'video', vPct, { received: vTrack.received, total: vTrack.total });
+          return;
+        }
+        if (hasAudio) {
+          const aPct = aTrack.total
+            ? Math.min(100, Math.round((aTrack.received / aTrack.total) * 100))
+            : (aTrack.done ? 100 : 0);
+          sendProgress(session, 'audio', aPct, { received: aTrack.received, total: aTrack.total });
+        }
+      }
+
+      sendProgress(session, 'video', 0);
+
+      const videoPromise = pageDownload(session, videoUrls, (p) => {
+        Object.assign(vTrack, p);
+        sendDashProgress();
+      }, preferHost, 'video').then((blob) => {
+        vTrack.done = true;
+        sendDashProgress();
+        return blob;
+      });
+
+      const audioPromise = hasAudio
+        ? pageDownload(session, audioUrls, (p) => {
+            Object.assign(aTrack, p);
+            if (vTrack.done) sendDashProgress();
+          }, preferHost, 'audio').then((blob) => {
+            aTrack.done = true;
+            if (vTrack.done) sendDashProgress();
+            return blob;
+          }).catch((e) => {
+            if (e.message === '下载已取消') throw e;
+            throw new Error('音频下载失败：' + e.message);
+          })
+        : Promise.resolve(null);
+
+      const [vBlob, aBlobRaw] = await Promise.all([videoPromise, audioPromise]);
+      log('下载', `视频轨 ${(vBlob.size / 1024 / 1024).toFixed(1)}MB`);
+
+      let aBlob = aBlobRaw;
+      if (aBlob && aBlob.size < 1024) {
+        log('下载', '音频流为空');
+        aBlob = null;
+      } else if (aBlob) {
+        log('下载', `音频轨 ${(aBlob.size / 1024 / 1024).toFixed(1)}MB`);
+      }
+
+      if (aBlob) {
+        await waitWhilePaused(session);
+        throwIfCancelled(session);
+        session.merging = true;
+        const mergeBytes = vBlob.size + aBlob.size;
+        sendProgress(session, 'merge', 0, { received: 0, total: mergeBytes });
+        let mp4Blob;
+        try {
+          mp4Blob = await mergeM4sInPage(vBlob, aBlob, session);
+        } catch (error) {
+          throwIfCancelled(session);
+          // Keep integrity checks intact; use an independent complete MP4
+          // instead of saving a corrupt/unsupported DASH merge.
+          if (!/媒体封装|媒体文件尾部|媒体片段|媒体索引|合并|合成|WORKER_UNAVAILABLE|memory|allocation/i.test(String(error?.message || error))) throw error;
+          log('合并', `DASH 合并失败：${error.message}；尝试同画质单文件片源`);
+          session.merging = false;
+          try {
+            const fallback = await getSingleFileStreams(aid, cid, qn, epId);
+            return await saveSingleFile(fallback);
+          } catch (fallbackError) {
+            throwIfCancelled(session);
+            log('合并', `单文件回退失败：${fallbackError.message}`);
+            throw new Error(`${error.message}；单文件回退失败：${fallbackError.message}`);
+          }
+        }
+        sendProgress(session, 'save', 100);
+        return {
+          merged: true, actualQn: streams.actualQn, actualLabel: streams.actualLabel,
+          filename: base + '.mp4',
+          blob: mp4Blob,
+          // 列表的“视频+音频”可复用已下载的 DASH 音频轨保存 M4A，
+          // 不再为同一条视频重新请求一次音频 CDN。普通 MP4 下载不保留它。
+          audioBlob: includeAudioBlob ? aBlob : null,
+          jobId: session.jobId
+        };
+      }
+
+      throw new Error('未获取到完整音频轨，请切换清晰度后重试');
+    } finally {
+      destroySession(session.jobId);
+    }
+  }
+
+  window.addEventListener('message', async (e) => {
+    if (e.source !== window || e.data?.source !== PANEL) return;
+    const { id, type } = e.data;
+
+    if (type === 'MERGE_RESULT') {
+      const jobId = e.data.jobId;
+      const waiter = mergeWaiters.get(jobId);
+      if (!waiter) return;
+      mergeWaiters.delete(jobId);
+      if (e.data.error) waiter.reject(new Error(e.data.error));
+      else waiter.resolve(e.data.blob);
+      return;
+    }
+
+    try {
+      switch (type) {
+        case 'PARSE_URL':
+          reply(id, { type: 'OK', data: { idInfo: parseVideoId(e.data.href) } });
+          break;
+        case 'RESOLVE_VIDEO':
+          reply(id, { type: 'OK', data: { info: await resolveVideo(e.data.href, e.data.pageIndex || 0) } });
+          break;
+        case 'RESOLVE_LIST':
+          reply(id, { type: 'OK', data: await resolveList(e.data?.cursor || null) });
+          break;
+        case 'SPACE_COLLECTIONS':
+          reply(id, { type: 'OK', data: await loadSpaceCollections(e.data?.cursor || null) });
+          break;
+        case 'LOAD_LIST_PAGE':
+          reply(id, { type: 'OK', data: await loadListPage(e.data.cursor) });
+          break;
+        case 'CHECK_PGC_ACCESS': {
+          if (!/^\d+$/.test(String(e.data.epId || ''))) throw new Error('无效的剧集编号');
+          let access;
+          try {
+            const data = await getPlayurl(e.data.aid, e.data.cid, 127, DASH_FNVAL, e.data.epId);
+            const video = (data.dash?.video || []).some(item => pickBestStreamUrl(item))
+              || (data.durl?.length === 1 && extractDurlUrls(data.durl[0]).length > 0);
+            const audio = collectAudioItems(data.dash || {}).some(item => extractStreamUrls(item).length);
+            access = { state: 'checked', video, audio };
+          } catch (error) {
+            const message = String(error?.message || error);
+            const reason = /试看/.test(message) ? 'preview'
+              : /地区|区域/.test(message) ? 'region'
+              : /受保护|DRM/i.test(message) ? 'protected'
+              : /权限|会员|付费|登录|10403/.test(message) ? 'permission' : 'error';
+            access = { state: reason === 'error' ? 'error' : 'blocked', reason, video: false, audio: false };
+          }
+          reply(id, { type: 'OK', data: access });
+          break;
+        }
+        case 'GET_QUALITIES':
+          reply(id, { type: 'OK', data: await getQualities(e.data.aid, e.data.cid, e.data.epId) });
+          break;
+        case 'GET_ESTIMATE':
+          reply(id, {
+            type: 'OK',
+            data: e.data.audioOnly
+              ? await estimateAudioSize(e.data.aid, e.data.cid, e.data.duration, e.data.epId)
+              : await estimateDownloadSize(
+                  e.data.aid,
+                  e.data.cid,
+                  e.data.qn,
+                  e.data.duration,
+                  e.data.streamPreference,
+                  e.data.epId
+                )
+          });
+          break;
+        case 'START_DOWNLOAD': {
+          const jobId = e.data.jobId || null;
+          const result = e.data.audioOnly
+            ? await handleAudioOnly(e.data.aid, e.data.cid, e.data.title, jobId, e.data.filenameBase, e.data.epId)
+            : await handleDownload(e.data.aid, e.data.cid, e.data.qn, e.data.title, jobId, e.data.filenameBase, e.data.streamPreference, e.data.includeAudioBlob === true, e.data.epId);
+          reply(id, { type: 'OK', data: result });
+          break;
+        }
+        case 'PAUSE_DOWNLOAD':
+          pauseDownloadControl(e.data.jobId || null);
+          break;
+        case 'RESUME_DOWNLOAD':
+          resumeDownloadControl(e.data.jobId || null);
+          break;
+        case 'CANCEL_DOWNLOAD':
+          cancelDownloadControl(e.data.jobId || null);
+          break;
+        default:
+          reply(id, { type: 'ERR', error: '未知请求: ' + type });
+      }
+    } catch (err) {
+      log('错误', `${type}: ${err?.message || String(err)}`);
+      reply(id, { type: 'ERR', error: formatAgentError(err, type) });
+    }
+  });
+
+  log('初始化', '页面代理已就绪 (MAIN world)');
+})();

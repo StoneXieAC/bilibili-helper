@@ -1,0 +1,100 @@
+{
+  "manifest_version": 3,
+  "incognito": "split",
+  "default_locale": "zh_CN",
+  "name": "__MSG_extName__",
+  "version": "0.0.1",
+  "description": "__MSG_extDesc__",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads",
+    "clipboardWrite",
+    "power"
+  ],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "https://*.bilivideo.com/*",
+    "https://*.bilivideo.cn/*",
+    "https://*.hdslb.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://space.bilibili.com/*",
+        "https://www.bilibili.com/video/*",
+        "https://www.bilibili.com/bangumi/play/*",
+        "https://bilibili.com/video/*",
+        "https://m.bilibili.com/video/*",
+        "https://www.bilibili.com/list/*",
+        "https://bilibili.com/list/*"
+      ],
+      "js": [
+        "content/page-agent.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://space.bilibili.com/*",
+        "https://www.bilibili.com/video/*",
+        "https://www.bilibili.com/bangumi/play/*",
+        "https://bilibili.com/video/*",
+        "https://m.bilibili.com/video/*",
+        "https://www.bilibili.com/list/*",
+        "https://bilibili.com/list/*"
+      ],
+      "js": [
+        "shared/filename.js",
+        "shared/download-settings.js",
+        "shared/theme-manager.js",
+        "shared/i18n-languages.js",
+        "shared/i18n.js",
+        "shared/i18n-extra.js",
+        "shared/i18n-ja-ko.js",
+        "shared/download-power.js",
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css",
+        "shared/design-system.css",
+        "shared/ambient-themes.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/mp4-remux.iife.js",
+        "lib/m4s-mux.js",
+        "lib/m4s-mux-worker.js",
+        "icons/icon128.png",
+        "shared/themes-ambient-full.json"
+      ],
+      "matches": [
+        "https://*.bilibili.com/*"
+      ]
+    }
+  ]
+}

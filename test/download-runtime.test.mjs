@@ -1,0 +1,235 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { readFile } from 'node:fs/promises';
+
+const agent = await readFile(new URL('../content/page-agent.js', import.meta.url), 'utf8');
+const content = await readFile(new URL('../content/content.js', import.meta.url), 'utf8');
+
+function streamSelectorHarness() {
+  const start = agent.indexOf('  function isAvcVideoStream(');
+  const end = agent.indexOf('  async function getStreams(', start);
+  assert.ok(start >= 0 && end > start, '应保留视频流选择器');
+  const context = vm.createContext({
+    pickBestStreamUrl: (item) => item.baseUrl || null,
+    urlScore: () => 0
+  });
+  vm.runInContext(agent.slice(start, end), context);
+  return context;
+}
+function harness(fetch, pickWorkingUrl = async (url) => url) {
+  const messages = [];
+  const context = vm.createContext({ Blob, AbortController, performance, fetch, setTimeout, clearTimeout,
+    window: { postMessage: (m) => messages.push(m) }, AGENT: 'agent', PROGRESS_REPORT_INTERVAL_MS: 150,
+    location: { href: 'https://www.bilibili.com/video/BVtest' },
+    pickWorkingUrl, isDownloadableCdnUrl: () => true,
+    rememberMirrorHost() {}, hostFromUrl: () => 'cdn', log() {}, sendProgress() {} });
+  vm.runInContext(agent.slice(agent.indexOf('  const sessions ='), agent.indexOf('  function mergeM4sInWorker')), context);
+  return { context, messages, session: context.createSession('test') };
+}
+const response = (bytes, headers = {}, status = 200) => new Response(new Uint8Array(bytes), { headers, status });
+
+test('audio and video share pause gate and both resume', async () => {
+  const { context: c, session: s } = harness();
+  c.pauseDownloadControl(s.jobId);
+  const a = c.waitWhilePaused(s), b = c.waitWhilePaused(s);
+  assert.equal(a, b);
+  c.resumeDownloadControl(s.jobId);
+  await Promise.all([a, b]);
+  assert.equal(s.pauseWait, null);
+});
+test('cancel wakes paused tracks and cancels merge; pause never cancels merge', async () => {
+  const { context: c, session: s, messages } = harness();
+  c.pauseDownloadControl(s.jobId);
+  assert.equal(messages.length, 0);
+  const waiting = c.waitWhilePaused(s);
+  c.cancelDownloadControl(s.jobId);
+  await waiting;
+  assert.equal(messages[0].type, 'MERGE_CANCEL');
+  assert.throws(() => c.throwIfCancelled(s), /已取消/);
+});
+test('destroying failed session releases all waiting tracks', async () => {
+  const { context: c, session: s } = harness();
+  c.pauseDownloadControl(s.jobId);
+  const waiting = c.waitWhilePaused(s);
+  c.destroySession(s.jobId);
+  await waiting;
+  assert.equal(s.cancelled, true);
+});
+test('reject truncated file instead of reporting success', async () => {
+  const { context: c, session: s } = harness(async () => response(2048, { 'content-length': '4096' }));
+  await assert.rejects(c.pageDownload(s, ['cdn']), /不完整/);
+});
+test('reject mismatched partial response', async () => {
+  const { context: c, session: s } = harness(async () => response(2048, { 'content-range': 'bytes 1024-3071/3072' }, 206));
+  await assert.rejects(c.pageDownload(s, ['cdn']), /范围不一致/);
+});
+test('pausing before CDN selection prevents network activity', async () => {
+  let calls = 0;
+  const { context: c, session: s } = harness(async () => { calls++; return response(2048); });
+  c.pauseDownloadControl(s.jobId);
+  const pending = c.pageDownload(s, ['cdn']);
+  await Promise.resolve();
+  assert.equal(calls, 0);
+  c.resumeDownloadControl(s.jobId);
+  assert.equal((await pending).size, 2048);
+});
+test('stalled network rejects and aborts its own track', async () => {
+  const { context: c } = harness();
+  const controller = new AbortController();
+  await assert.rejects(c.withStallTimeout(new Promise(() => {}), controller, 5), /无响应/);
+  assert.equal(controller.signal.aborted, true);
+});
+
+test('same-quality streams default to the highest source bitrate, with a compatibility override', () => {
+  const c = streamSelectorHarness();
+  const avc = { baseUrl: 'https://cdn.example/avc', codecid: 7, codecs: 'avc1.640028', bandwidth: 1_500_000 };
+  const hevc = { baseUrl: 'https://cdn.example/hevc', codecid: 12, codecs: 'hev1.1.6.L150.90', bandwidth: 3_200_000 };
+  assert.equal(c.selectVideoStream([avc, hevc], 'high-bitrate'), hevc);
+  assert.equal(c.selectVideoStream([avc, hevc], 'compatible'), avc);
+});
+test('ignored resume Range restarts without duplicating bytes', async () => {
+  let c, s, calls = 0;
+  const h = harness(async (_url, options) => {
+    if (++calls === 2) {
+      assert.equal(options.headers.Range, 'bytes=1024-');
+      return response(2048, { 'content-length': '2048' });
+    }
+    let reads = 0;
+    return { ok: true, status: 200, headers: new Headers({ 'content-length': '2048' }), body: {
+      getReader: () => ({ async read() {
+        if (++reads === 1) return { done: false, value: new Uint8Array(1024) };
+        c.pauseDownloadControl(s.jobId);
+        setTimeout(() => c.resumeDownloadControl(s.jobId), 0);
+        throw new Error('aborted');
+      }, releaseLock() {} }) } };
+  });
+  c = h.context; s = h.session;
+  assert.equal((await c.pageDownload(s, ['cdn'])).size, 2048);
+  assert.equal(calls, 2);
+});
+
+function saveHarness(results) {
+  const calls = [], revoked = [], blobs = [];
+  const c = vm.createContext({ URL: { createObjectURL: (blob) => { blobs.push(blob); return 'blob:test'; }, revokeObjectURL: (u) => revoked.push(u) },
+    debugLog() {},
+    setTimeout: (fn) => setTimeout(fn, 0),
+    EXT: { runtime: {
+      getManifest: () => ({ manifest_version: 3 }),
+      sendMessage: async (msg) => { calls.push(msg); return results.shift(); }
+    } } });
+  vm.runInContext(content.slice(content.indexOf('  async function downloadBlob'), content.indexOf('  function formatView')), c);
+  return { save: c.downloadBlob, calls, revoked, blobs };
+}
+test('MP4 and M4A saves override empty/text MIME without changing media bytes', async () => {
+  for (const [extension, mime] of [['mp4', 'video/mp4'], ['m4a', 'audio/mp4']]) {
+    for (const sourceType of ['', 'text/plain']) {
+      const h = saveHarness([{ ok: true, downloadId: 1 }, { ok: true, state: 'complete' }]);
+      const bytes = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 255]);
+      await h.save(new Blob([bytes], { type: sourceType }), `媒体.${extension}`);
+      assert.equal(h.blobs[0].type, mime);
+      assert.deepEqual(new Uint8Array(await h.blobs[0].arrayBuffer()), bytes);
+      assert.equal(h.calls[0].filename, `媒体.${extension}`);
+    }
+  }
+});
+test('invalid filename retries the same Blob once using a short sanitized title', async () => {
+  const h = saveHarness([{ ok: false, error: 'Invalid filename' }, { ok: true, downloadId: 2 }, { ok: true, state: 'complete' }]);
+  assert.equal(await h.save(new Blob(['media']), '标题🤔 | MEOVV 🐾.mp4', () => false, '原视频标题'), 2);
+  assert.equal(h.calls[1].filename, '标题 _ MEOVV.mp4');
+  assert.equal(h.calls[0].url, h.calls[1].url);
+  assert.equal(h.blobs.length, 1);
+  assert.equal(h.revoked.length, 1);
+});
+test('filename fallback stops after one retry and unrelated errors do not retry', async () => {
+  const h = saveHarness([{ ok: false, error: 'Invalid filename' }, { ok: false, error: 'Invalid filename' }]);
+  await assert.rejects(h.save(new Blob(['media']), 'CON.m4a', () => false, '原视频标题'), /Invalid filename/);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[1].filename, '_CON.m4a');
+  const other = saveHarness([{ ok: false, error: 'Disk failure' }]);
+  await assert.rejects(other.save(new Blob(['media']), 'custom.mp4', () => false, '标题'), /Disk failure/);
+  assert.equal(other.calls.length, 1);
+});
+test('native save waits for complete, then releases Blob URL', async () => {
+  const h = saveHarness([{ ok: true, downloadId: 1 }, { ok: true, state: 'in_progress' }, { ok: true, state: 'complete' }]);
+  assert.equal(await h.save(new Blob(['a']), 'a.mp4'), 1);
+  assert.equal(h.calls.length, 3);
+  assert.equal(h.revoked.length, 1);
+});
+test('native interruption is failure, not successful download', async () => {
+  const h = saveHarness([{ ok: true, downloadId: 1 }, { ok: true, state: 'interrupted', error: 'FILE_NO_SPACE' }]);
+  await assert.rejects(h.save(new Blob(['a']), 'a.mp4'), /FILE_NO_SPACE/);
+  assert.equal(h.revoked.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.revoked.length, 1);
+});
+test('cancel before saving never creates browser download', async () => {
+  const h = saveHarness([]);
+  await assert.rejects(h.save(new Blob(['a']), 'a.mp4', () => true), /已取消/);
+  assert.equal(h.calls.length, 0);
+});
+
+test('background rejects external Blob origin and unrelated browser downloads', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  let listener, created = 0;
+  const c = vm.createContext({ URL, console, chrome: {
+    runtime: { id: 'extension', onInstalled: { addListener() {} }, onMessage: { addListener(fn) { listener = fn; } } },
+    downloads: { download: async () => { created++; return 5; }, search: async () => [{ id: 5, byExtensionId: 'other', state: 'complete' }] }
+  } });
+  vm.runInContext(source, c);
+  const sender = { id: 'extension', tab: { id: 1 }, url: 'https://www.bilibili.com/video/BVtest' };
+  const call = (msg) => new Promise((resolve) => listener(msg, sender, resolve));
+  assert.equal((await call({ type: 'BILI_DL_SAVE_MEDIA', url: 'blob:https://evil.test/id', filename: 'a.mp4' })).ok, false);
+  assert.equal(created, 0);
+  assert.equal((await call({ type: 'BILI_DL_MEDIA_STATE', downloadId: 5 })).ok, false);
+  assert.equal((await call({ type: 'BILI_DL_SAVE_MEDIA', url: 'blob:https://www.bilibili.com/id', filename: 'a.mp4' })).downloadId, 5);
+});
+
+test('cover requests use a parsed, allowlisted HTTPS URL for fetch and native save', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  let listener;
+  const fetched = [], downloaded = [];
+  const c = vm.createContext({
+    URL, btoa, crypto, AbortController, setTimeout, clearTimeout, console: { info() {}, warn() {}, error() {} },
+    fetch: async (url, options) => {
+      fetched.push([url, options]);
+      return response(1, { 'content-type': 'image/png' });
+    },
+    chrome: {
+      runtime: { id: 'extension', onInstalled: { addListener() {} }, onMessage: { addListener(fn) { listener = fn; } } },
+      downloads: { download(options, done) { downloaded.push(new URL(options.url)); done(1); } }
+    }
+  });
+  vm.runInContext(source, c);
+  const sender = { id: 'extension', tab: { id: 1 }, url: 'https://www.bilibili.com/video/BVtest' };
+  const cover = (url, forBatch) => new Promise((resolve) =>
+    listener({ type: 'BILI_DL_DOWNLOAD_COVER', url, filename: 'cover.png', forBatch, requestId: crypto.randomUUID() }, sender, resolve));
+  for (const forBatch of [true, false]) {
+    for (const url of ['https://not-hdslb.com/cover.png', 'https://example.hdslb.com.example/cover.png',
+      'https://user@i0.hdslb.com/cover.png', 'https://i0.hdslb.com:8443/cover.png', 'invalid URL']) {
+      assert.equal((await cover(url, forBatch)).ok, false);
+    }
+  }
+  assert.equal(fetched.length, 0);
+  assert.equal(downloaded.length, 0);
+  assert.equal((await cover('http://I0.HDSLB.COM/cover.png', true)).ok, true);
+  assert.ok(fetched[0][0] instanceof URL);
+  assert.equal(fetched[0][0].href, 'https://i0.hdslb.com/cover.png');
+  assert.equal(fetched[0][1].redirect, 'error');
+  assert.equal((await cover('https://hdslb.com/cover.png', false)).ok, true);
+  assert.equal(downloaded[0].hostname, 'hdslb.com');
+});
+
+test('merge rejects missing indexes and truncated boxes before entering remuxer', async () => {
+  const c = vm.createContext({ Blob, ReadableStream, setTimeout });
+  vm.runInContext(await readFile(new URL('../lib/m4s-mux.js', import.meta.url), 'utf8'), c);
+  const box = (type, size = 8) => {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setUint32(0, size);
+    bytes.set([...type].map((char) => char.charCodeAt(0)), 4);
+    return bytes;
+  };
+  await assert.rejects(c.BiliM4sMux.validateFragmentedInput(new Blob([box('moov'), box('mdat')])), /索引不匹配/);
+  await assert.rejects(c.BiliM4sMux.validateFragmentedInput(new Blob([box('moof')])), /序号不连续/);
+  await assert.rejects(c.BiliM4sMux.validateFragmentedInput(new Blob([box('mdat', 100)])), /不完整/);
+});

@@ -1,0 +1,1866 @@
+#bili-dl-panel {
+  /* Download Assistant UI System V1 · Bilibili
+     Brand tokens come from shared/design-system.css via data-theme.
+     Local --bdl-* below are fallbacks only. */
+  --bdl-accent: #00aeec;
+  --bdl-accent-strong: #007fba;
+  --bdl-accent-hover: #009fd8;
+  --bdl-accent-contrast: #ffffff;
+  --bdl-accent-soft: #eaf9ff;
+  --bdl-accent-border: #a9e8fa;
+  --bdl-surface: #f7f8fa;
+  --bdl-bg: #ffffff;
+  --bdl-text: #18181b;
+  --bdl-text-muted: #71717a;
+  --bdl-border: #e5e7eb;
+  --bdl-header-text: #18181b;
+  --bdl-success-bg: #f7f8fa;
+  --bdl-success-text: #18181b;
+  --bdl-error-bg: #fff4f2;
+  --bdl-error-text: #a72c22;
+  --bdl-radius: 6px;
+  --bdl-shadow: 0 8px 24px rgba(24, 24, 27, 0.12);
+  --brand-cta: linear-gradient(135deg, #009ddb, #0074da);
+
+  position: fixed;
+  /* 零尺寸宿主不占用页面点击区域，面板自行定位。 */
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--bdl-text);
+}
+
+/* 面板内通用 hidden（队列按钮等依赖此类） */
+#bili-dl-panel-root .hidden {
+  display: none !important;
+}
+
+#bili-dl-panel-root button:focus-visible,
+#bili-dl-panel-root a:focus-visible,
+#bili-dl-panel-root input:focus-visible,
+#bili-dl-panel-root select:focus-visible {
+  outline: 2px solid var(--bdl-accent);
+  outline-offset: 2px;
+}
+#bili-dl-menu.is-page .bili-dl-footer { display: none !important; }
+
+.bili-dl-mode-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 10px 16px 0;
+}
+
+.bili-dl-mode-tabs button {
+  flex: 1;
+  min-height: 32px;
+  box-sizing: border-box;
+  border: 1px solid #e3e5e7;
+  border-radius: 7px;
+  background: #f6f7f8;
+  color: var(--text-secondary, #52525b);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.bili-dl-mode-tabs button.active {
+  color: #008cc9;
+  background: #eaf7ff;
+  border-color: #00a1d6;
+  font-weight: 600;
+}
+
+.bili-dl-list-body { width: 100%; box-sizing: border-box; padding: 14px 16px 8px; background: var(--bdl-bg); }
+.bili-dl-list-download-kind-row { margin: 0 0 12px; }
+.bili-dl-list-download-kind { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.bili-dl-list-download-kind label { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; height: 34px; box-sizing: border-box; padding: 0 8px; border: 1px solid var(--bdl-border); border-radius: 8px; background: var(--bdl-surface); color: var(--bdl-text-muted); cursor: pointer; font-size: 12px; line-height: 1.2; transition: background .15s, border-color .15s, color .15s; }
+.bili-dl-list-download-kind label:hover:not(:has(input:disabled)) { border-color: var(--bdl-accent-border); color: var(--bdl-accent-strong); }
+.bili-dl-list-download-kind label:has(input:checked) { border-color: var(--bdl-accent-border); color: var(--bdl-accent-strong); background: var(--bdl-accent-soft); font-weight: 600; }
+.bili-dl-list-download-kind input { appearance: none; -webkit-appearance: none; position: relative; flex: 0 0 15px; width: 15px; height: 15px; box-sizing: border-box; margin: 0; border: 1px solid var(--bdl-border); border-radius: 4px; background: var(--bdl-bg); cursor: inherit; }
+.bili-dl-list-download-kind input:checked { border-color: var(--bdl-accent); background: var(--bdl-accent); }
+.bili-dl-list-download-kind input:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 7px; border: solid var(--bdl-accent-contrast); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.bili-dl-list-download-kind label:has(input:focus-visible) { outline: 2px solid var(--bdl-accent); outline-offset: 2px; }
+.bili-dl-list-download-kind input:focus-visible { outline: none; }
+.bili-dl-list-download-kind label:has(input:disabled) { opacity: .6; cursor: default; }
+@media (forced-colors: active) { .bili-dl-list-download-kind input { appearance: auto; -webkit-appearance: auto; } .bili-dl-list-download-kind input:checked::after { content: none; } }
+.bili-dl-list-tools { display: flex; gap: 8px; margin-bottom: 10px; }
+.bili-dl-list-tools input { min-width: 0; flex: 1; height: 32px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text); font: inherit; font-size: 12px; }
+.bili-dl-list-tools input:focus { outline: 2px solid var(--bdl-accent-soft); border-color: var(--bdl-accent); }
+.bili-dl-list-filter { display: inline-flex; gap: 4px; flex: 0 0 auto; }
+.bili-dl-list-filter button { min-width: 42px; padding: 0 8px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text-muted); font-size: 11px; cursor: pointer; }
+.bili-dl-list-filter button.active { color: var(--bdl-accent-contrast); border-color: var(--bdl-accent); background: var(--bdl-accent); }
+.bili-dl-list-tools select { max-width: 64px; padding: 0 4px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text); font: inherit; font-size: 11px; }
+/* 列表页回归简洁下载布局；滚动到底仍会后台追加下一页。 */
+.bili-dl-list-tools,
+#bili-dl-list-load-more { display: none !important; }
+.bili-dl-list-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 13px; }
+.bili-dl-list-head span, .bili-dl-list-status { color: var(--bdl-text-muted); font-size: 11px; }
+.bili-dl-list-head button { margin-left: 4px; padding: 0; border: 0; background: transparent; color: var(--bdl-accent); font-size: 11px; cursor: pointer; }
+.bili-dl-list-head { align-items: center; }
+.bili-dl-list-heading { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+#bili-dl-list-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 20px; }
+#bili-dl-list-count { line-height: 16px; }
+#bili-dl-list-select-all { flex: 0 0 auto; min-width: 72px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--bdl-border); border-radius: 8px; background: var(--bdl-surface); color: var(--bdl-text); font-weight: 500; white-space: nowrap; cursor: pointer; }
+#bili-dl-list-select-all:hover { background: var(--bdl-accent-soft); border-color: var(--bdl-accent); color: var(--bdl-accent-strong); }
+#bili-dl-list-select-all[aria-pressed="true"] { background: var(--bdl-accent-soft); border-color: var(--bdl-accent); color: var(--bdl-accent-strong); font-weight: 600; }
+#bili-dl-list-select-all:focus-visible { outline: 2px solid var(--bdl-accent); outline-offset: 2px; }
+#bili-dl-list-select-all:disabled { opacity: .45; cursor: default; }
+.bili-dl-list-items { max-height: 310px; overflow: auto; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); margin-bottom: 10px; }
+.bili-dl-list-body.is-queue-running .bili-dl-list-items { max-height: 142px; }
+.bili-dl-list-item { display: flex; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid var(--bdl-border); cursor: pointer; }
+.bili-dl-list-item:last-child { border-bottom: 0; }
+.bili-dl-list-item.is-unavailable {
+  cursor: not-allowed;
+  background: var(--bdl-surface);
+  color: var(--bdl-text-muted);
+}
+.bili-dl-list-item.is-unavailable strong {
+  color: var(--bdl-text-muted);
+  font-weight: 400;
+}
+.bili-dl-list-item input:disabled { cursor: not-allowed; opacity: .55; }
+.bili-dl-list-item .bili-dl-pgc-access {
+  color: var(--bdl-accent-strong);
+  white-space: normal;
+}
+.bili-dl-list-item.is-unavailable .bili-dl-pgc-access { color: var(--bdl-text-muted); }
+.bili-dl-list-item-index { color: var(--bdl-text-muted); font-size: 11px; min-width: 18px; text-align: right; }
+.bili-dl-list-item-meta { min-width: 0; display: grid; gap: 2px; }
+.bili-dl-list-item-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.bili-dl-list-item-meta small { color: var(--bdl-text-muted); font-size: 10px; }
+.bili-dl-list-result { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 24px; margin-top: 6px; padding: 0 2px; }
+.bili-dl-list-status { min-width: 0; margin: 0; overflow: hidden; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.bili-dl-list-status[data-type="error"] { color: var(--bdl-error-text); }
+.bili-dl-list-status[data-type="success"] { color: var(--bdl-success-text); }
+.bili-dl-list-retry { min-height: 30px; padding: 0 10px; border: 1px solid var(--bdl-accent-border); border-radius: 7px; background: var(--bdl-accent-soft); color: var(--bdl-accent-strong); font: inherit; font-size: 11px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.bili-dl-list-retry:hover:not(:disabled) { border-color: var(--bdl-accent); background: var(--bdl-accent); color: var(--bdl-accent-contrast); }
+.bili-dl-list-retry:disabled { opacity: .55; cursor: not-allowed; }
+.bili-dl-list-empty { margin: 0; padding: 18px 10px; color: var(--bdl-text-muted); text-align: center; font-size: 12px; }
+
+.bili-dl-header-icon {
+  background: #04b6fe !important;
+  background-color: #04b6fe !important;
+}
+
+#bili-dl-menu {
+  position: fixed;
+  pointer-events: auto;
+  bottom: 16px;
+  left: auto;
+  right: 16px;
+  width: 408px;
+  max-width: calc(100vw - 32px);
+  /* 所有标签和信息页共用同一外框高度；短窗口只缩小内容视口。 */
+  height: min(calc(100vh - 32px), 650px);
+  height: min(calc(100dvh - 32px), 650px);
+  max-height: min(calc(100vh - 32px), 650px);
+  max-height: min(calc(100dvh - 32px), 650px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: var(--bdl-bg);
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  box-shadow: var(--bdl-shadow);
+  overflow: hidden;
+}
+
+#bili-dl-menu.hidden {
+  display: none;
+}
+
+/* 仅首次打开面板播一次入场；公告/合作页禁用 transform，避免跟高度变化叠成抖动 */
+#bili-dl-menu.is-entering:not(.is-page) {
+  animation: bili-dl-slide-up 0.25s ease;
+}
+
+#bili-dl-menu.is-page {
+  animation: none;
+}
+
+@media (max-width: 420px) {
+  #bili-dl-menu { max-width: calc(100vw - 32px); }
+  .bili-dl-mode-tabs, .bili-dl-list-body, .bili-dl-body { padding-left: 12px; padding-right: 12px; }
+  .bili-dl-list-tools { flex-wrap: wrap; }
+  .bili-dl-list-tools input { min-width: 180px; }
+}
+
+/* /list 页滚动交给当前标签内容视口，页脚始终可见。 */
+#bili-dl-menu.is-list-page #bili-dl-home {
+  overflow: hidden;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-body,
+#bili-dl-menu.is-list-page .bili-dl-list-body {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-body {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-list-body {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-list-items {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(350px, calc(100dvh - 340px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-list-body.is-queue-running .bili-dl-list-items {
+  max-height: 142px;
+}
+
+#bili-dl-menu.is-list-page .bili-dl-list-head,
+#bili-dl-menu.is-list-page .bili-dl-list-tools,
+#bili-dl-menu.is-list-page #bili-dl-list-load-more,
+#bili-dl-menu.is-list-page #bili-dl-list-start,
+#bili-dl-menu.is-list-page #bili-dl-list-job-panel,
+#bili-dl-menu.is-list-page .bili-dl-list-result,
+#bili-dl-menu.is-list-page .bili-dl-list-body > .bili-dl-section {
+  flex: 0 0 auto;
+}
+
+/* 单视频下载只使用内容区这一根滚动条，任务卡本身不再制造嵌套滚动。 */
+#bili-dl-menu.is-list-page .bili-dl-body .bili-dl-job-list {
+  max-height: none;
+  overflow: visible;
+}
+
+/* 列表下载同时显示清单和任务卡时，两块区域均保持可操作。 */
+#bili-dl-menu.is-list-page .bili-dl-list-body .bili-dl-job-panel {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+@keyframes bili-dl-slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+#bili-dl-home {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.bili-dl-header {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  min-height: 52px;
+  padding: 8px 16px;
+  background: var(--bdl-bg);
+  color: var(--bdl-header-text);
+  border-bottom: 1px solid var(--bdl-border);
+}
+
+.bili-dl-header::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--bdl-accent), transparent 65%);
+  opacity: .28;
+}
+
+.bili-dl-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bili-dl-header-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.bili-dl-title {
+  font-weight: 600;
+  font-size: 15px;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.bili-dl-version {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bdl-surface);
+  color: var(--bdl-text-muted);
+  flex-shrink: 0;
+}
+
+#bili-dl-close {
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  color: var(--bdl-text-muted);
+  font-size: 18px;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--bdl-radius);
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+#bili-dl-close:hover {
+  color: var(--bdl-accent-strong);
+  border-color: var(--bdl-accent-border);
+  background: var(--bdl-accent-soft);
+}
+
+.bili-dl-body {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px 16px;
+  background: var(--bdl-bg);
+}
+
+.bili-dl-detect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--bdl-text);
+}
+
+.bili-dl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bdl-accent);
+  flex-shrink: 0;
+}
+
+.bili-dl-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bdl-bg);
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+}
+
+.bili-dl-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.bili-dl-badge.hidden {
+  display: none;
+}
+
+.bili-dl-video-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.bili-dl-cover-column {
+  flex: 0 0 96px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bili-dl-cover-wrap {
+  position: relative;
+  width: 96px;
+  height: 54px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #eef2f6;
+  box-shadow: none;
+}
+
+.bili-dl-cover-download {
+  position: static;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 96px;
+  min-height: 24px;
+  margin: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--bdl-border);
+  border-radius: 6px;
+  background: var(--bdl-surface);
+  color: var(--bdl-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+
+.bili-dl-cover-download:hover:not(:disabled) {
+  border-color: var(--bdl-accent-border);
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent-strong, #007fba);
+}
+
+.bili-dl-cover-download:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.bili-dl-cover.hidden {
+  display: none;
+}
+
+.bili-dl-cover-ph {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bdl-text-muted);
+  background: #eef2f6;
+}
+
+.bili-dl-cover-ph.hidden {
+  display: none;
+}
+
+.bili-dl-shimmer {
+  background: var(--bdl-border);
+}
+
+.bili-dl-sk-cover {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
+
+.bili-dl-sk-cover.hidden {
+  display: none;
+}
+
+.bili-dl-video-sk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.bili-dl-video-sk.hidden {
+  display: none;
+}
+
+.bili-dl-sk-line {
+  display: block;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--bdl-border);
+}
+
+.bili-dl-sk-line.short {
+  width: 55%;
+  height: 10px;
+}
+
+.bili-dl-sk-line.shorter {
+  width: 38%;
+  height: 10px;
+}
+
+.bili-dl-video-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bili-dl-video-content.hidden {
+  display: none;
+}
+
+.bili-dl-video-card.is-loading {
+  pointer-events: none;
+}
+
+.bili-dl-video-meta {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+}
+
+.bili-dl-video-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bdl-text, #1f2329);
+  line-height: 18px;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bili-dl-video-author {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: #5f6368;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bili-dl-video-author.hidden {
+  display: none;
+}
+
+.bili-dl-video-author::before {
+  content: 'UP · ';
+  color: #5f6368;
+  font-weight: 400;
+}
+
+.bili-dl-video-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: #747c89;
+}
+
+.bili-dl-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+  max-height: 72px;
+  overflow-y: auto;
+}
+
+.bili-dl-pages.hidden {
+  display: none;
+}
+
+.bili-dl-page-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.bili-dl-page-btn:hover,
+.bili-dl-page-btn.active {
+  border-color: var(--bdl-accent);
+  color: var(--bdl-accent);
+  background: var(--bdl-accent-soft);
+}
+
+.bili-dl-section {
+  margin-bottom: 12px;
+}
+
+.bili-dl-section-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bdl-text);
+  margin-bottom: 8px;
+}
+
+.bili-dl-section-head svg {
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-quality-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bili-dl-pill {
+  padding: 0 12px;
+  min-height: 30px;
+  border: 1px solid var(--bdl-border);
+  border-radius: 6px;
+  background: var(--bdl-surface);
+  color: var(--text-secondary, #52525b);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.bili-dl-pill.active {
+  border-color: #00a1d6;
+  background: #eaf7ff;
+  color: #008cc9;
+  font-weight: 600;
+}
+
+.bili-dl-pill.loading,
+.bili-dl-pill.disabled {
+  cursor: default;
+  color: var(--text-muted, #71717a);
+  opacity: 1;
+}
+
+.bili-dl-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 11px;
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-info-item {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  color: var(--bdl-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.bili-dl-info-item svg {
+  display: none;
+}
+
+.bili-dl-info-tip {
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-btn {
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  border-radius: 8px;
+  min-height: 44px;
+  background: var(--bdl-accent);
+  color: var(--bdl-accent-contrast);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: background 0.2s, opacity 0.2s;
+}
+
+.bili-dl-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.bili-dl-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bili-dl-btn-secondary {
+  margin-top: 8px;
+  background: var(--brand-soft, var(--bdl-accent-soft));
+  color: var(--brand-strong, var(--bdl-accent-strong));
+  border: 1px solid var(--brand-border, var(--bdl-accent-border));
+  font-weight: 600;
+}
+
+.bili-dl-btn-secondary:hover:not(:disabled) {
+  background: var(--bdl-bg);
+  border-color: var(--brand, var(--bdl-accent));
+  color: var(--brand-strong, var(--bdl-accent-strong));
+}
+
+/* 队列控制是次级操作：比主下载按钮更轻，但不再像浏览器默认按钮。 */
+.bili-dl-btn-queue {
+  min-height: 38px;
+  padding: 8px 12px;
+  /* Match the primary download CTA; the softer treatment comes from color
+     and border, not a smaller, visually unrelated type scale. */
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.bili-dl-queue-actions .bili-dl-btn-queue {
+  width: 100%;
+  margin-top: 0;
+}
+
+.bili-dl-btn-danger {
+  background: var(--bdl-error-bg);
+  border-color: #f5c8c2;
+  color: var(--bdl-error-text);
+}
+
+.bili-dl-btn-danger:hover:not(:disabled) {
+  background: #ffe8e5;
+  border-color: #e89990;
+  color: #8f241b;
+}
+
+.bili-dl-estimate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  min-height: 32px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: #f7f8fa;
+  font-size: 11px;
+  color: var(--text-muted, #71717a);
+  line-height: 1.45;
+}
+
+.bili-dl-estimate.hidden {
+  display: none;
+}
+
+.bili-dl-estimate svg {
+  flex-shrink: 0;
+  margin-top: 0;
+  color: var(--bdl-accent);
+}
+
+.bili-dl-hint {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--bdl-text);
+}
+
+.bili-dl-hint.hidden {
+  display: none;
+}
+
+.bili-dl-parallel-tip {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-parallel-tip.is-busy {
+  color: var(--bdl-text);
+}
+
+.bili-dl-job-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  border-radius: 8px;
+  color: var(--bdl-text);
+}
+
+.bili-dl-job-panel.hidden {
+  display: none;
+}
+
+.bili-dl-job-panel .bili-dl-job-list {
+  margin-top: 0;
+  max-height: none;
+  overflow: visible;
+  gap: 0;
+}
+
+.bili-dl-job-panel .bili-dl-job-list.hidden {
+  display: none;
+}
+
+.bili-dl-job-panel .bili-dl-job-card {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.bili-dl-job-panel .bili-dl-job-card + .bili-dl-job-card {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bdl-border);
+}
+
+.bili-dl-job-panel-queue {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bili-dl-job-panel-queue.hidden {
+  display: none;
+}
+
+.bili-dl-job-list:not(.hidden) + .bili-dl-job-panel-queue {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bdl-border);
+}
+
+.bili-dl-quality-strategy-row,
+.bili-dl-filename-row,
+.bili-dl-stream-preference-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 10px; color: var(--bdl-text-muted); font-size: 11px; }
+.bili-dl-quality-strategy-row select,
+.bili-dl-filename-row select,
+.bili-dl-stream-preference-row select { max-width: 210px; padding: 5px 8px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text); font: inherit; font-size: 11px; }
+.bili-dl-filename-preview { display: flex; align-items: baseline; gap: 4px; min-width: 0; margin: 0 0 8px; color: var(--bdl-text-muted); font-size: 11px; line-height: 1.4; white-space: nowrap; }
+.bili-dl-filename-preview-label { flex: 0 0 auto; color: var(--bdl-text-muted); }
+.bili-dl-filename-preview-name { min-width: 0; overflow: hidden; color: var(--text-secondary, #52525b); font-weight: 500; text-overflow: ellipsis; }
+/* 高级选项仍保留已保存的默认行为，常用下载面板不展示，避免打断主流程。 */
+.bili-dl-quality-strategy-row,
+.bili-dl-filename-row { display: none; }
+.bili-dl-stream-preference-row { display: none !important; }
+.bili-dl-status-action {
+  margin: 0 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.bili-dl-status-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.bili-dl-job-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.bili-dl-job-list.hidden {
+  display: none;
+}
+
+.bili-dl-progress {
+  padding: 10px 12px;
+  background: var(--bdl-surface);
+  border: 1px solid var(--bdl-border);
+  border-radius: 8px;
+  color: var(--bdl-text);
+}
+
+.bili-dl-progress.hidden {
+  display: none;
+}
+
+.bili-dl-job-pct {
+  color: var(--bdl-accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.bili-dl-job-pct.hidden {
+  display: none;
+}
+
+.bili-dl-progress-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.bili-dl-progress-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bdl-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bili-dl-progress-q {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bili-dl-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.bili-dl-progress-sub {
+  margin: -2px 0 8px;
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bili-dl-progress-sub.hidden {
+  display: none;
+}
+
+.bili-dl-job-cancel-inline {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #a72c22;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.bili-dl-job-cancel-inline.hidden {
+  display: none;
+}
+
+.bili-dl-job-cancel-inline:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bili-dl-progress-head span:first-child {
+  color: var(--bdl-text);
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bili-dl-progress-track {
+  height: 4px;
+  background: var(--bdl-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bili-dl-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--bdl-accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.bili-dl-progress-bar.indeterminate {
+  width: 35% !important;
+  animation: bili-dl-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.bili-dl-progress-bar.paused {
+  opacity: 0.55;
+}
+
+.bili-dl-progress-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bili-dl-progress-actions.hidden {
+  display: none;
+}
+
+.bili-dl-action-btn {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-bg);
+  color: var(--bdl-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.bili-dl-action-btn:hover {
+  border-color: var(--bdl-accent);
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+}
+
+.bili-dl-action-btn.danger:hover {
+  border-color: var(--bdl-error-text);
+  background: color-mix(in srgb, var(--bdl-error-text) 18%, var(--bdl-surface));
+  color: var(--bdl-error-text);
+}
+
+.bili-dl-action-btn.danger {
+  border-color: color-mix(in srgb, var(--bdl-error-text) 35%, var(--bdl-border));
+  background: color-mix(in srgb, var(--bdl-error-text) 12%, var(--bdl-surface));
+  color: var(--bdl-error-text);
+}
+
+@keyframes bili-dl-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+
+.bili-dl-status {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--bdl-radius);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.bili-dl-status.hidden {
+  display: none;
+}
+
+.bili-dl-status.success {
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+  border: 1px solid var(--bdl-border);
+}
+
+.bili-dl-status.error {
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+  border: 1px solid var(--bdl-border);
+}
+
+
+
+#bili-dl-space-download-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 12px;
+  padding: 5px 9px;
+  border: 1px solid #00a1d6;
+  border-radius: 6px;
+  background: #eaf7ff;
+  color: #008cc9;
+  font: 500 12px/18px system-ui, sans-serif;
+  vertical-align: middle;
+  cursor: pointer;
+}
+#bili-dl-space-download-all[hidden] { display: none; }
+#bili-dl-space-download-all:disabled { opacity: .6; cursor: wait; }
+#bili-dl-space-download-all:hover { background: #d8f1ff; }
+#bili-dl-space-download-all:focus-visible { outline: 2px solid #00a1d6; outline-offset: 2px; }
+#bili-dl-space-download-all svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+.bili-dl-space-profile {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  border: 1px solid var(--bdl-border, #eef0f3);
+  border-radius: 10px;
+}
+
+.bili-dl-space-profile img {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.bili-dl-space-profile-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.bili-dl-space-profile-copy strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.bili-dl-space-profile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--bdl-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.bili-dl-list-filter-sep {
+  color: var(--bdl-text-muted, #9aa0a6);
+  font-size: 11px;
+  user-select: none;
+}
+
+.bili-dl-list-refresh-page {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bdl-accent);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bili-dl-list-refresh-page:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+
+.bili-dl-space-profile .bili-dl-list-refresh-page {
+  flex: 0 0 auto;
+  align-self: center;
+  max-width: 110px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--bdl-accent-border);
+  border-radius: 7px;
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent-strong);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.bili-dl-space-profile .bili-dl-list-refresh-page:hover:not(:disabled) { border-color: var(--bdl-accent); }
+.bili-dl-space-profile .bili-dl-list-refresh-page:focus-visible { outline: 2px solid var(--bdl-accent); outline-offset: 2px; }
+
+.bili-dl-footer {
+  display: flex;
+  /* 固定高度面板的剩余空间留在内容与导航之间。 */
+  margin-top: auto;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border-top: 1px solid #eef0f3;
+  color: #5f6368;
+  flex-shrink: 0;
+}
+
+.bili-dl-footer-links {
+  display: contents;
+}
+
+.bili-dl-footer-action + .bili-dl-footer-action::before {
+  display: none;
+}
+
+.bili-dl-footer-link,
+.bili-dl-footer-action {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #5f6368;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+
+.bili-dl-footer-link svg,
+.bili-dl-footer-action svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  opacity: 0.9;
+}
+
+.bili-dl-footer-link:hover,
+.bili-dl-footer-action:hover,
+.bili-dl-footer-action.is-copied {
+  background: #f7fbff;
+  border-color: #9ddcfa;
+  color: var(--brand-strong, var(--bdl-accent-strong, #007fba));
+}
+
+/* 底栏入口沿用统一轻量样式。 */
+#bili-dl-panel[data-theme] .bili-dl-footer {
+  gap: 2px;
+  padding: 6px 8px;
+  background: #fff;
+  border-top: 1px solid #eef0f3;
+}
+
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-link,
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-action {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 32px;
+  gap: 3px;
+  padding: 4px 1px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #61666d;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-link svg,
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-action svg {
+  width: 12px;
+  height: 12px;
+}
+
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-link:hover,
+#bili-dl-panel[data-theme] .bili-dl-footer .bili-dl-footer-action:hover {
+  background: #eaf7ff;
+  color: #008cc9;
+}
+/* 兼容旧类名，避免设计系统残留样式回潮 */
+.bili-dl-footer-settings {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #666;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bili-dl-page {
+  flex: 1 1 0%;
+  min-height: 0;
+  padding: 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 沿用诊断日志和任务中心的底栏可见性。 */
+.bili-dl-footer-links [data-sheet="diagnostics"],
+.bili-dl-footer-links [data-sheet="tasks"] {
+  display: none !important;
+}
+
+.bili-dl-diagnostics-text {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--bdl-border);
+  border-radius: 10px;
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.bili-dl-diagnostics-copy {
+  margin-top: 10px;
+}
+
+.bili-dl-task-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.bili-dl-task-filters button, .bili-dl-task-row button { padding: 5px 8px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text); font: inherit; font-size: 11px; cursor: pointer; }
+.bili-dl-task-filters button.active { background: var(--bdl-accent); border-color: var(--bdl-accent); color: var(--bdl-accent-contrast); }
+.bili-dl-task-row button:hover { border-color: var(--bdl-accent-border); background: var(--bdl-accent-soft); color: var(--bdl-accent-strong); }
+.bili-dl-task-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--bdl-border); font-size: 12px; }
+.bili-dl-task-row strong, .bili-dl-task-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bili-dl-task-row span { color: var(--bdl-text-muted); grid-column: 1; }
+.bili-dl-task-row small { color: var(--bdl-text-muted); grid-column: 1; line-height: 1.35; }
+.bili-dl-task-row button { grid-column: 2; grid-row: 1 / span 2; }
+
+.bili-dl-page-back {
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  margin: 0 0 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.bili-dl-page-back::before {
+  content: '←';
+  margin-right: 6px;
+}
+
+.bili-dl-page-back:hover {
+  background: var(--bdl-accent-soft);
+  border-color: var(--bdl-accent-border);
+  color: var(--bdl-accent-strong);
+}
+
+.bili-dl-page-title {
+  margin: 0 0 2px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--bdl-text);
+}
+
+.bili-dl-info-date {
+  margin: 6px 0 0;
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+}
+
+.bili-dl-info-body {
+  margin-top: 12px;
+  color: var(--bdl-text);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.bili-dl-info-body p {
+  margin: 0 0 8px;
+}
+
+/* 仅裁掉原图周围的大面积装饰留白，不重新生成二维码。 */
+
+.bili-dl-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: var(--bdl-text-muted);
+  font-size: 12px;
+}
+
+.bili-dl-settings-theme-control {
+  position: relative;
+  z-index: 2;
+  width: 210px;
+  max-width: 66%;
+  flex: 0 1 210px;
+}
+
+.bili-dl-settings-theme-control:has([aria-expanded="true"]) {
+  z-index: 6;
+}
+
+.bili-dl-settings-theme-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bili-dl-settings-theme-trigger:hover,
+.bili-dl-settings-theme-trigger[aria-expanded="true"] {
+  border-color: var(--bdl-accent-border);
+}
+
+.bili-dl-settings-theme-current-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bili-dl-settings-theme-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border: 1px solid rgb(24 24 27 / 12%);
+  border-radius: 5px;
+  background: linear-gradient(135deg, #009ddb, #0074da);
+}
+
+.bili-dl-settings-theme-chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin: -4px 2px 0 auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.bili-dl-settings-theme-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--bdl-border);
+  border-radius: 8px;
+  background: var(--bdl-bg);
+  box-shadow: 0 8px 22px rgb(24 24 27 / 16%);
+}
+
+.bili-dl-settings-theme-options.hidden {
+  display: none;
+}
+
+.bili-dl-settings-theme-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--bdl-text);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bili-dl-settings-theme-option:hover,
+.bili-dl-settings-theme-option[aria-selected="true"] {
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent-strong);
+}
+
+.bili-dl-settings-theme-option:focus-visible,
+.bili-dl-settings-theme-trigger:focus-visible {
+  outline: 2px solid var(--bdl-accent);
+  outline-offset: 1px;
+}
+#bili-dl-panel[data-theme-kind="ambient"] .bili-dl-mode-tabs button.active,
+#bili-dl-panel[data-theme-kind="ambient"] .bili-dl-pill.active {
+  border-color: var(--brand-border);
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+}
+
+#bili-dl-panel[data-theme-kind="ambient"] #bili-dl-list-select-all:hover {
+  border-color: var(--brand-border);
+  background: var(--brand-soft);
+}
+
+.bili-dl-settings-select {
+  max-width: 210px;
+  min-width: 0;
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.bili-dl-settings-custom {
+  margin: 0 0 10px;
+}
+
+.bili-dl-settings-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--bdl-border);
+  border-radius: var(--bdl-radius);
+  background: var(--bdl-surface);
+  color: var(--bdl-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.bili-dl-settings-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.bili-dl-settings-chip {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bdl-accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bili-dl-settings-chip:hover {
+  text-decoration: underline;
+}
+.bili-dl-settings-line,
+.bili-dl-settings-preview,
+.bili-dl-settings-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bili-dl-settings-line {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin: 0 0 4px;
+}
+.bili-dl-settings-preview {
+  margin: 0;
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.bili-dl-settings-preview {
+  flex: 1 1 220px;
+  align-items: flex-start;
+  line-height: 1.6;
+}
+.bili-dl-settings-preview-label {
+  flex: 0 0 auto;
+}
+.bili-dl-settings-preview-names {
+  min-width: 0;
+  color: var(--bdl-text);
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.bili-dl-settings-error {
+  margin: 0 0 4px;
+  color: var(--bdl-error-text);
+  font-size: 11px;
+}
+
+.bili-dl-settings-foot {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.bili-dl-settings-status {
+  color: var(--bdl-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bili-dl-settings-status:empty {
+  display: none;
+}
+
+.bili-dl-settings-reset {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bdl-text-muted);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bili-dl-settings-reset:hover {
+  color: var(--bdl-accent);
+}
+
+/* ===== 格式切换 ===== */
+.bili-dl-format-row {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.bili-dl-format-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bili-dl-format-pills .bili-dl-pill {
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* ===== 下载历史 ===== */
+.bili-dl-history {
+  border-top: 1px solid var(--bdl-border);
+  background: var(--bdl-bg);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.bili-dl-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bdl-text);
+}
+
+.bili-dl-history-clear {
+  border: none;
+  background: none;
+  color: var(--bdl-text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.bili-dl-history-clear:hover {
+  background: var(--bdl-accent-soft);
+  color: var(--bdl-accent);
+}
+
+.bili-dl-history-list {
+  padding: 4px 8px 10px;
+}
+
+.bili-dl-history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px;
+  border-radius: var(--bdl-radius);
+}
+
+.bili-dl-history-item:hover {
+  background: var(--bdl-accent-soft);
+}
+
+.bili-dl-history-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.bili-dl-history-item-title {
+  font-size: 12px;
+  color: var(--bdl-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bili-dl-history-item-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--bdl-text-muted);
+}
+
+.bili-dl-history-item-link {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bdl-accent-soft);
+  border: 1px solid var(--bdl-border);
+  color: var(--bdl-accent);
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.bili-dl-history-item-link:hover {
+  background: var(--bdl-accent-soft);
+}
+
+.bili-dl-history-empty {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--bdl-text-muted);
+}
+
+/* 历史按钮（footer） */
+.bili-dl-history-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bdl-accent-soft);
+  border: 1px solid var(--bdl-border);
+  color: var(--bdl-accent);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bili-dl-history-btn:hover {
+  background: var(--bdl-accent-soft);
+}
+
+.bili-dl-collections-directory { padding: 16px; text-align: left; color: var(--bdl-text); }
+.bili-dl-collections-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bili-dl-collections-heading strong { font-size: 15px; font-weight: 700; }
+.bili-dl-collections-count { min-width: 24px; padding: 2px 7px; border-radius: 999px; background: var(--bdl-accent-soft); color: var(--bdl-accent); font-size: 11px; text-align: center; }
+.bili-dl-collections-count:empty { display: none; }
+.bili-dl-collections-hint { margin: 8px 0 16px; color: var(--bdl-text-muted); font-size: 12px; line-height: 1.65; }
+.bili-dl-collections-cards { display: flex; flex-direction: column; gap: 10px; }
+.bili-dl-collection-card { display: flex; align-items: center; gap: 12px; padding: 13px 12px; border: 1px solid var(--bdl-border); border-radius: 10px; background: var(--bdl-surface); color: var(--bdl-text); text-decoration: none; transition: border-color .15s, background .15s; }
+.bili-dl-collection-card:hover { border-color: var(--bdl-accent); background: var(--bdl-accent-soft); }
+.bili-dl-collection-card:focus-visible, .bili-dl-collections-more:focus-visible { outline: 2px solid var(--bdl-accent); outline-offset: 3px; }
+.bili-dl-collection-symbol { display: flex; align-items: center; justify-content: center; flex: 0 0 38px; height: 38px; border-radius: 9px; background: var(--bdl-accent-soft); color: var(--bdl-accent); font-size: 23px; }
+.bili-dl-collection-copy { min-width: 0; flex: 1; }
+.bili-dl-collection-copy strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; font-weight: 600; }
+.bili-dl-collection-copy small { display: block; margin-top: 5px; color: var(--bdl-text-muted); font-size: 11px; }
+.bili-dl-collection-arrow { flex-shrink: 0; color: var(--bdl-accent); font-size: 18px; }
+.bili-dl-collections-message { margin: 12px 0 0; color: var(--bdl-text-muted); font-size: 12px; line-height: 1.6; }
+.bili-dl-collections-message:empty { display: none; }
+.bili-dl-collections-more { width: 100%; margin-top: 12px; padding: 9px 12px; border: 1px solid var(--bdl-border); border-radius: 8px; background: var(--bdl-accent-soft); color: var(--bdl-accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.bili-dl-collections-more:disabled { opacity: .5; cursor: wait; }
+
+@media (prefers-reduced-motion: reduce) {
+  #bili-dl-panel-root *, #bili-dl-panel-root *::before, #bili-dl-panel-root *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

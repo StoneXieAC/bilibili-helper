@@ -1,0 +1,4645 @@
+(function () {
+  'use strict';
+
+  if (window.__BILI_DL_INIT__) return;
+  window.__BILI_DL_INIT__ = true;
+  const EXT = typeof browser !== 'undefined' ? browser : chrome;
+
+  const PANEL = 'bili-dl-panel';
+  const AGENT = 'bili-dl-agent';
+  const VERSION = EXT.runtime.getManifest().version;
+  function isSpacePage() {
+    return location.hostname === 'space.bilibili.com' && /^\/\d+\/?(?:upload\/video\/?)?$/.test(location.pathname);
+  }
+  function isSpaceCollectionPage() {
+    return location.hostname === 'space.bilibili.com' && /^\/\d+\/lists\/\d+\/?$/.test(location.pathname);
+  }
+  function isSpaceCollectionsIndex() {
+    return location.hostname === 'space.bilibili.com' && /^\/\d+\/lists\/?$/.test(location.pathname);
+  }
+  function chooseSpaceQuality(available, tier) {
+    // Bilibili's 112 / 116 are also 1080P (+ / 60fps); 120 starts at 4K.
+    const cap = tier === 'highest' ? Infinity : tier === '720' ? 64 : 116;
+    return available.filter((quality) => Number(quality.qn) > 0 && Number(quality.qn) <= cap)
+      .sort((a, b) => Number(b.qn) - Number(a.qn))[0];
+  }
+  // 图标资源缓存破坏：换图标后递增 ICON_REV，避免只 F5 仍显示旧图
+  const ICON_REV = '27';
+  const ICON_URL = EXT.runtime.getURL(`icons/icon128.png?r=${ICON_REV}`);
+  const DOWNLOAD_PREFS_KEY = 'biliDlDownloadPrefs_v1';
+  const THEME_PREF_KEY = 'biliDlTheme_v1';
+  function t(key, values) {
+    return globalThis.BiliDlI18n?.t?.(key, values) ?? key;
+  }
+  function translateFilenameError(msg) {
+    const s = String(msg || '');
+    if (s === '模板不能为空') return t('templateEmpty');
+    if (s === '模板不能包含路径分隔符') return t('templatePath');
+    const unknown = s.match(/^未知变量：(.+)$/);
+    if (unknown) return t('templateUnknown', { vars: unknown[1] });
+    return s;
+  }
+  function translateUserError(msg) {
+    const s = String(msg || '');
+    const exact = {
+      '下载已取消': 'errDownloadCancelled',
+      '保存数据不可用，请刷新页面后重试': 'errSaveUnavailable',
+      '保存文件格式无效，请重新选择 MP4 或 M4A': 'errInvalidFormat',
+      '无法创建浏览器下载': 'errCreateDownload',
+      '无法确认保存结果，请检查浏览器下载记录': 'errConfirmSave',
+      '请求失败': 'errRequestFailed',
+      '页面代理超时，请刷新页面重试': 'errAgentTimeout',
+      '合并失败': 'errMergeFailed',
+      '不允许的下载请求': 'bgErrNotAllowed',
+      '无效的媒体地址': 'bgErrInvalidMedia',
+      '无效的文件名': 'bgErrInvalidFilename',
+      '无效的下载编号': 'bgErrInvalidDownloadId',
+      '下载记录不可用，请打开浏览器下载记录检查': 'bgErrDownloadUnavailable',
+      '不允许的封面地址': 'bgErrCoverNotAllowed',
+      '封面下载失败': 'bgErrCoverFailed',
+      '无法读取该投稿的视频信息': 'readPostFailed',
+      '页面未就绪': 'pageNotReady'
+    };
+    if (exact[s]) return t(exact[s]);
+    if (s.startsWith('浏览器保存失败：')) return t('errSaveInterrupted', { detail: s.slice('浏览器保存失败：'.length) });
+    if (s.startsWith('合成长期无进展')) return t('errMergeTimeout');
+    if (s.startsWith('WORKER_UNAVAILABLE')) return t('errWorkerTimeout');
+    if (s.startsWith('合成组件加载超时')) return t('errMuxLoadTimeout', { file: s.split(': ').slice(1).join(': ') });
+    if (s.startsWith('合成组件加载失败')) return t('errMuxLoadFailed', { file: s.split(': ').slice(1).join(': ') });
+    if (s.startsWith('合成组件读取失败')) return t('errMuxReadFailed', { file: s.split(': ').slice(1).join(': ') });
+    return s;
+  }
+  function localizeQualityLabel(label) {
+    let text = String(label || '');
+    const pairs = [
+      ['准高清', 'qNearHd'],
+      ['高码率', 'qHighBitrate'],
+      ['超清', 'qUhd'],
+      ['高清', 'qHd'],
+      ['标清', 'qSd'],
+      ['流畅', 'qFluent']
+    ];
+    for (const [zh, key] of pairs) {
+      if (text.includes(zh)) text = text.replaceAll(zh, t(key));
+    }
+    return text;
+  }
+  function stepLabel(step) {
+    const map = {
+      prepare: 'stepPrepare',
+      download: 'stepDownloadVideo',
+      video: 'stepDownloadVideo',
+      audio: 'stepDownloadAudio',
+      merge: 'stepMerge',
+      save: 'stepSave',
+      paused: 'stepPaused',
+      queue: 'stepQueue'
+    };
+    return t(map[step] || 'stepDownloading');
+  }
+  function formatListLoadedCount(loaded, total) {
+    return t('listLoadedCount', {
+      loaded,
+      total: total ? t('listLoadedTotal', { total }) : ''
+    });
+  }
+  function themeDisplayName(id, fallback) {
+    if (id === 'bilibili') return t('defaultTheme');
+    const i18nKey = `theme-${id}`;
+    const translated = t(i18nKey);
+    return translated === i18nKey ? fallback : translated;
+  }
+  const FILENAME_CHIP_KEYS = {
+    title: 'chipTitle',
+    author: 'chipAuthor',
+    bvid: 'chipBvid',
+    part: 'chipPart',
+    partTitle: 'chipPartTitle',
+    index: 'chipIndex',
+    quality: 'chipQuality',
+    date: 'chipDate'
+  };
+  async function copyTextToClipboard(text) {
+    const value = String(text ?? '');
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+    } catch {
+      // Content script may lack transient focus; fall back below.
+    }
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;left:8px;top:8px;width:12px;height:12px;opacity:0.02;z-index:2147483647';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    area.setSelectionRange(0, value.length);
+    const ok = document.execCommand('copy');
+    area.remove();
+    if (!ok) throw new Error('execCommand copy failed');
+  }
+
+  let muxReadyPromise = null;
+  const MERGE_WORKER_URL = EXT.runtime.getURL('lib/m4s-mux-worker.js');
+  let mergeWorkerSourcePromise = null;
+  function loadMergeWorkerSource() {
+    if (!mergeWorkerSourcePromise) {
+      mergeWorkerSourcePromise = Promise.all([
+        'lib/mp4-remux.iife.js', 'lib/m4s-mux.js', 'lib/m4s-mux-worker.js'
+      ].map(async (path) => {
+        const response = await fetch(EXT.runtime.getURL(path));
+        if (!response.ok) throw new Error('合成组件读取失败: ' + path);
+        return response.text();
+      })).then((sources) => sources.join('\n;\n')).catch((error) => {
+        mergeWorkerSourcePromise = null;
+        throw error;
+      });
+    }
+    return mergeWorkerSourcePromise;
+  }
+  const LARGE_MERGE_BYTES = 512 * 1024 * 1024;
+  const MAX_SMALL_MERGE_WORKERS = 2;
+  const mergeWorkerQueue = [];
+  const activeMergeWorkers = new Map();
+  let acceptsMergeRequest = () => false;
+
+  function isLargeMerge(job) {
+    if (job?.mode && job.mode !== 'dash') return false;
+    return Number(job?.totalBytes || 0) >= LARGE_MERGE_BYTES;
+  }
+
+  function postMergeResult(job, payload) {
+    window.postMessage({ source: PANEL, type: 'MERGE_RESULT', jobId: job.jobId, ...payload }, '*');
+  }
+
+  function finishMergeWorkerJob(job, payload) {
+    if (!job || job.finished) return;
+    job.finished = true;
+    clearTimeout(job.startTimer);
+    clearTimeout(job.stallTimer);
+    try { job.worker?.terminate(); } catch { /* ignore */ }
+    if (job.workerUrl) URL.revokeObjectURL(job.workerUrl);
+    job.videoBlob = null;
+    job.audioBlob = null;
+    activeMergeWorkers.delete(job.jobId);
+    const queuedIndex = mergeWorkerQueue.indexOf(job);
+    if (queuedIndex >= 0) mergeWorkerQueue.splice(queuedIndex, 1);
+    postMergeResult(job, payload);
+    drainMergeWorkerQueue();
+  }
+
+  function canStartMergeWorker(job) {
+    const active = [...activeMergeWorkers.values()];
+    if (!active.length) return true;
+    // 大文件独占合成通道：不限制文件大小，只避免多个大 MP4 同时争用内存与 CPU。
+    if (isLargeMerge(job) || active.some(isLargeMerge)) return false;
+    return active.length < MAX_SMALL_MERGE_WORKERS;
+  }
+
+  async function runMergeWorker(job) {
+    // Reserve the slot before loading scripts so pending starts obey the limit.
+    activeMergeWorkers.set(job.jobId, job);
+    let worker;
+    try {
+      // A content script still creates workers with the document's origin.
+      // Bundle only packaged scripts into a same-origin Blob instead of trying
+      // to construct a cross-origin chrome-extension:// worker.
+      const source = await loadMergeWorkerSource();
+      if (job.finished) return;
+      job.workerUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+      worker = new Worker(job.workerUrl);
+    } catch (error) {
+      finishMergeWorkerJob(job, { error: `WORKER_UNAVAILABLE: ${error?.message || error}` });
+      return;
+    }
+    job.worker = worker;
+    activeMergeWorkers.set(job.jobId, job);
+    const armStallWatchdog = () => {
+      clearTimeout(job.stallTimer);
+      job.stallTimer = setTimeout(() => finishMergeWorkerJob(job, { error: '合成长期无进展，已停止并释放资源，请重试' }), 180000);
+    };
+    job.startTimer = setTimeout(() => {
+      if (!job.ready) finishMergeWorkerJob(job, { error: 'WORKER_UNAVAILABLE: 合成 Worker 启动超时' });
+    }, 8000);
+
+    worker.onmessage = (event) => {
+      const data = event.data || {};
+      if (data.type === 'READY') {
+        job.ready = true;
+        clearTimeout(job.startTimer);
+        armStallWatchdog();
+        try {
+          worker.postMessage({ type: 'MERGE', jobId: job.jobId, videoBlob: job.videoBlob, audioBlob: job.audioBlob });
+          // 发送给 Worker 后不再保留页面侧引用，降低内容脚本的峰值内存。
+          job.videoBlob = null;
+          job.audioBlob = null;
+        } catch (error) {
+          finishMergeWorkerJob(job, { error: `WORKER_UNAVAILABLE: ${error?.message || error}` });
+        }
+        return;
+      }
+      if (data.type === 'PROGRESS') {
+        armStallWatchdog();
+        updateProgress?.('merge', 0, data.received, data.total, job.jobId, {
+          elapsedMs: data.elapsedMs,
+          etaMs: data.etaMs
+        });
+        return;
+      }
+      if (data.type === 'ACTIVITY') {
+        armStallWatchdog();
+        return;
+      }
+      if (data.type === 'DONE') {
+        finishMergeWorkerJob(job, { blob: data.blob });
+        return;
+      }
+      if (data.type === 'ERROR') finishMergeWorkerJob(job, { error: data.error || '合并失败' });
+    };
+    worker.onerror = (event) => {
+      event.preventDefault?.();
+      const prefix = job.ready ? '' : 'WORKER_UNAVAILABLE: ';
+      finishMergeWorkerJob(job, { error: prefix + (event.message || '合成 Worker 发生错误') });
+    };
+  }
+
+  function drainMergeWorkerQueue() {
+    for (const job of [...mergeWorkerQueue]) {
+      if (!canStartMergeWorker(job)) break;
+      const index = mergeWorkerQueue.indexOf(job);
+      if (index >= 0) mergeWorkerQueue.splice(index, 1);
+      runMergeWorker(job);
+    }
+  }
+
+  function requestWorkerMerge(data) {
+    const jobId = String(data?.jobId || '');
+    if (!jobId || !data?.videoBlob?.size || !data?.audioBlob?.size) return;
+    if (!acceptsMergeRequest(jobId) || activeMergeWorkers.has(jobId) || mergeWorkerQueue.some((job) => job.jobId === jobId)) return;
+    const job = {
+      jobId,
+      videoBlob: data.videoBlob,
+      audioBlob: data.audioBlob,
+      totalBytes: Number(data.videoBlob.size) + Number(data.audioBlob.size),
+      worker: null,
+      ready: false,
+      finished: false,
+      startTimer: null
+    };
+    mergeWorkerQueue.push(job);
+    if (!canStartMergeWorker(job)) {
+      updateProgress?.('merge', 0, 0, job.totalBytes, jobId, { queued: true });
+    }
+    drainMergeWorkerQueue();
+  }
+
+  function cancelWorkerMerge(jobId, notify = true) {
+    const queued = mergeWorkerQueue.find((job) => job.jobId === jobId);
+    const active = activeMergeWorkers.get(jobId);
+    const job = queued || active;
+    if (!job) return false;
+    try { job.worker?.postMessage({ type: 'CANCEL', jobId }); } catch { /* ignore */ }
+    finishMergeWorkerJob(job, notify ? { error: '下载已取消' } : { error: '下载已取消' });
+    return true;
+  }
+
+  function createFragment(html) {
+    return document.createRange().createContextualFragment(html);
+  }
+
+  function clearNode(node) {
+    node.replaceChildren();
+  }
+
+  function appendTextElement(parent, tagName, className, text, title) {
+    const el = document.createElement(tagName);
+    if (className) el.className = className;
+    el.textContent = text;
+    if (title) el.title = title;
+    parent.appendChild(el);
+    return el;
+  }
+
+  function setupMuxInPage() {
+    if (muxReadyPromise) return muxReadyPromise;
+    const base = EXT.runtime.getURL('lib/');
+    const loadScript = (file) => new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = base + file;
+      const timer = setTimeout(() => { s.remove(); reject(new Error('合成组件加载超时: ' + file)); }, 10000);
+      s.onload = () => { clearTimeout(timer); resolve(); };
+      s.onerror = () => { clearTimeout(timer); s.remove(); reject(new Error('合成组件加载失败: ' + file)); };
+      (document.documentElement || document.head).appendChild(s);
+    });
+    muxReadyPromise = loadScript('mp4-remux.iife.js').then(() => loadScript('m4s-mux.js')).catch((error) => {
+      muxReadyPromise = null;
+      throw error;
+    });
+    return muxReadyPromise;
+  }
+
+  // Undefined means directory selection was cancelled; no task should start.
+  async function pickBatchDirectory(event) {
+    if (!event?.isTrusted || typeof window.showDirectoryPicker !== 'function') {
+      throw new Error(t('batchDirectoryUnavailable'));
+    }
+    try {
+      return await window.showDirectoryPicker({ mode: 'readwrite', id: 'bili-download-batch' });
+    } catch (error) {
+      if (error.name === 'AbortError') return undefined;
+      throw new Error(t('batchDirectoryFailed'));
+    }
+  }
+
+  const batchDirectoryWrites = new WeakMap();
+
+  async function writeBatchFile(directory, blob, filename, shouldCancel) {
+    // Serialize allocation and commit within this directory, including cleanup.
+    const previous = batchDirectoryWrites.get(directory) || Promise.resolve();
+    const write = previous.then(() => writeBatchFileUnlocked(directory, blob, filename, shouldCancel));
+    const tail = write.catch(() => {});
+    batchDirectoryWrites.set(directory, tail);
+    try { return await write; }
+    finally {
+      if (batchDirectoryWrites.get(directory) === tail) batchDirectoryWrites.delete(directory);
+    }
+  }
+
+  async function writeBatchFileUnlocked(directory, blob, filename, shouldCancel) {
+    const checkCancelled = () => {
+      if (shouldCancel()) throw new Error('下载已取消');
+    };
+    const dot = filename.lastIndexOf('.');
+    const base = Array.from(filename.slice(0, dot));
+    const extension = filename.slice(dot);
+    const encoder = new TextEncoder();
+    let file;
+    let writer;
+    let name;
+    try {
+      if (!blob?.size || dot <= 0 || /[\\/\x00-\x1f]/.test(filename)) throw new Error('Invalid batch file');
+      for (let suffix = 0; !writer; suffix++) {
+        checkCancelled();
+        const ending = `${suffix ? ` (${suffix})` : ''}${extension}`;
+        let bytes = encoder.encode(ending).length;
+        let stem = '';
+        for (const char of base) {
+          bytes += encoder.encode(char).length;
+          // Leave room for Chrome's temporary write-file suffix.
+          if (bytes > 240) break;
+          stem += char;
+        }
+        name = stem.trimEnd() + ending;
+        try {
+          await directory.getFileHandle(name);
+          continue;
+        } catch (error) {
+          if (error.name === 'TypeMismatchError') continue;
+          if (error.name !== 'NotFoundError') throw error;
+        }
+        try {
+          file = await directory.getFileHandle(name, { create: true });
+          writer = await file.createWritable({ mode: 'exclusive' });
+        } catch (error) {
+          if (error.name === 'TypeMismatchError' || error.name === 'NoModificationAllowedError') {
+            file = null;
+            continue;
+          }
+          throw error;
+        }
+        // Another tab may have completed this name between lookup and lock.
+        if ((await file.getFile()).size) {
+          file = null;
+          await writer.abort();
+          writer = null;
+          continue;
+        }
+      }
+      checkCancelled();
+      await writer.write(blob);
+      checkCancelled();
+      await writer.close();
+      return name;
+    } catch (error) {
+      await writer?.abort().catch(() => {});
+      if (file) {
+        // create:true can leave an empty entry if the stream never commits.
+        try {
+          const entry = await directory.getFileHandle(name);
+          if (await file.isSameEntry(entry) && !(await entry.getFile()).size) await directory.removeEntry(name);
+        } catch { /* The directory may no longer be writable. */ }
+      }
+      if (error.message === '下载已取消') throw error;
+      throw new Error('保存阶段失败：' + t('batchWriteFailed'));
+    }
+  }
+
+  async function downloadBlob(blob, filename, shouldCancel = () => false, fallbackTitle = '', directory = null) {
+    if (shouldCancel()) throw new Error('下载已取消');
+    if (!blob?.size || !filename) throw new Error('保存数据不可用，请刷新页面后重试');
+    const extension = /\.(mp4|m4a)$/i.exec(filename)?.[1]?.toLowerCase();
+    if (!extension) throw new Error('保存文件格式无效，请重新选择 MP4 或 M4A');
+    // Direct CDN downloads may have an empty or text MIME type. Give the
+    // browser an explicit media type without decoding or copying all bytes.
+    const mediaType = extension === 'm4a' ? 'audio/mp4' : 'video/mp4';
+    const mediaBlob = blob.type === mediaType ? blob : blob.slice(0, blob.size, mediaType);
+    if (directory) {
+      await writeBatchFile(directory, mediaBlob, filename, shouldCancel);
+      return null;
+    }
+    const url = URL.createObjectURL(mediaBlob);
+    let downloadId;
+    let saveCompleted = false;
+    try {
+      const invalidFilename = (error) => /invalid\s*filename|无效的文件名/i.test(String(error || ''));
+      let started;
+      try {
+        started = await EXT.runtime.sendMessage({ type: 'BILI_DL_SAVE_MEDIA', url, filename });
+      } catch (error) {
+        if (!invalidFilename(error.message)) throw error;
+        started = { ok: false, error: error.message };
+      }
+      if (!started?.ok && invalidFilename(started?.error) && fallbackTitle) {
+        if (shouldCancel()) throw new Error('下载已取消');
+        // Retry only a rejected filename, reusing the already downloaded Blob.
+        // Sanitize the rendered template name, preserving configured fields on retry.
+        const title = String(filename).replace(/\.(mp4|m4a)$/i, '').normalize('NFKC')
+          .replace(/[\u{10000}-\u{10ffff}]/gu, '')
+          .replace(/[\u0000-\u001F\u007F\uD800-\uDFFF\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE00-\uFE0F]/g, '')
+          .replace(/[\\/:*?"<>|~]/g, '_').replace(/\s+/g, ' ').trim();
+        let base = Array.from(title).slice(0, 120).join('').replace(/[. ]+$/g, '') || 'bilibili-video';
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base)) base = `_${base}`;
+        filename = `${base}.${extension}`;
+        console.warn('[BiliDL] 文件名被拒绝，使用安全化的模板文件名保存', filename);
+        started = await EXT.runtime.sendMessage({ type: 'BILI_DL_SAVE_MEDIA', url, filename });
+      }
+      if (!started?.ok) throw new Error(started?.error || '无法创建浏览器下载');
+      downloadId = started.downloadId;
+      if (!Number.isInteger(downloadId)) throw new Error('浏览器未返回有效下载编号，无法确认保存');
+      debugLog('保存', `已创建浏览器下载 ${downloadId}：${filename}`);
+      let lastBytes = -1;
+      let lastProgressAt = Date.now();
+      for (;;) {
+        if (shouldCancel()) {
+          await EXT.runtime.sendMessage({ type: 'BILI_DL_CANCEL_MEDIA', downloadId });
+          throw new Error('下载已取消');
+        }
+        const result = await EXT.runtime.sendMessage({ type: 'BILI_DL_MEDIA_STATE', downloadId });
+        if (!result?.ok) throw new Error(result?.error || '无法确认保存结果，请检查浏览器下载记录');
+        if (result.state === 'complete') {
+          saveCompleted = true;
+          debugLog('保存', `完成 ${downloadId}：${result.actualFilename || filename}`);
+          return downloadId;
+        }
+        if (result.state === 'interrupted') throw new Error('浏览器保存失败：' + (result.error || '下载中断'));
+        if (Number(result.bytesReceived || 0) !== lastBytes) {
+          lastBytes = Number(result.bytesReceived || 0);
+          lastProgressAt = Date.now();
+        } else if (Date.now() - lastProgressAt > 180000) {
+          await EXT.runtime.sendMessage({ type: 'BILI_DL_CANCEL_MEDIA', downloadId });
+          throw new Error('浏览器保存长时间无进展，已停止；请检查磁盘空间和浏览器下载记录');
+        }
+        // Poll only while a native save is active; no idle/background-page polling.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      // Errors at this stage concern saving a local Blob, not CDN transfer.
+      // Keep this distinction so queues stop instead of downloading more media.
+      if (shouldCancel()) throw new Error('下载已取消');
+      throw new Error(`保存阶段失败${Number.isInteger(downloadId) ? `（下载编号 ${downloadId}）` : ''}：${error?.message || error}`);
+    } finally {
+      // A transient messaging failure does not prove the native download has
+      // stopped reading. Do not invalidate its source immediately on failure.
+      if (saveCompleted) URL.revokeObjectURL(url);
+      else setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+  }
+
+  function formatView(n) {
+    const v = Number(n) || 0;
+    const lang = globalThis.BiliDlI18n?.language?.() || 'zh-CN';
+    if (lang === 'en') {
+      if (v >= 1e9) return (v / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+      if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+      return String(v);
+    }
+    if (v >= 100000000) return (v / 100000000).toFixed(1).replace(/\.0$/, '') + t('unitYi');
+    if (v >= 10000) return (v / 10000).toFixed(1).replace(/\.0$/, '') + t('unitWan');
+    return String(v);
+  }
+
+  function formatTime(ts) {
+    if (!ts) return '';
+    const diff = Math.max(0, Date.now() - ts * 1000);
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return t('justNow');
+    if (m < 60) return t('minutesAgo', { n: m });
+    const h = Math.floor(m / 60);
+    if (h < 24) return t('hoursAgo', { n: h });
+    const d = Math.floor(h / 24);
+    if (d < 30) return t('daysAgo', { n: d });
+    const mo = Math.floor(d / 30);
+    if (mo < 12) return t('monthsAgo', { n: mo });
+    return t('yearsAgo', { n: Math.floor(mo / 12) });
+  }
+
+  let videoInfo = null;
+  let qualities = [];
+  let selectedQn = 0;
+  let selectedFormat = 'mp4'; // 'mp4' | 'm4a'
+  function listContentParts(kind) {
+    const legacy = kind === 'both' ? 'video+audio' : kind;
+    const parts = String(legacy || '').split('+');
+    return ['video', 'audio', 'cover'].filter((part) => parts.includes(part));
+  }
+  let listDownloadKind = 'video'; // Canonical combination: video+audio+cover (legacy both supported).
+  let qualityStrategy = 'exact'; // exact | highest
+  // Selects among Bilibili's existing streams of the same resolution; never re-encodes.
+  let streamPreference = 'high-bitrate';
+  let filenameTemplate = (globalThis.BiliDlSettings && globalThis.BiliDlSettings.DEFAULTS.filenameTemplate) || '{title}';
+  function pageIndexFromUrl(href) {
+    const part = Number(new URL(href).searchParams.get('p'));
+    return Number.isSafeInteger(part) && part > 0 ? part - 1 : 0;
+  }
+  let pageIndex = pageIndexFromUrl(location.href);
+  let isOpen = false;
+  let reqId = 0;
+  const pending = new Map();
+
+  let downloading = false;
+  let batchConcurrency = 3;
+  let queueRunning = false;
+  let queueCancelled = false;
+  let queuePaused = false;
+  let queuePauseWaiter = null;
+
+  async function addHistory(entry) {
+    try {
+      const response = await EXT.runtime.sendMessage({ type: 'BILI_DL_ADD_HISTORY', entry });
+      if (!response?.ok) throw new Error(response?.error || '历史记录写入失败');
+      return response.items;
+    } catch (error) {
+      debugLog('历史', String(error?.message || error));
+      return null;
+    }
+  }
+
+  /** B 站 view API：pages.length > 1 且每 P 有 cid 才是真·多 P */
+  function isMultiPartVideo(pages) {
+    return Array.isArray(pages) && pages.length > 1 && pages.every((p) => p && p.cid);
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.source !== window || e.data?.source !== AGENT) return;
+    const { id, type, step, msg, data, error } = e.data;
+
+    if (type === 'MERGE_REQUEST') {
+      requestWorkerMerge(e.data);
+      return;
+    }
+    if (type === 'MERGE_CANCEL') {
+      cancelWorkerMerge(e.data.jobId);
+      return;
+    }
+
+    if (type === 'LOG') {
+      if (typeof debugLog === 'function') debugLog(step, msg);
+      return;
+    }
+    if (type === 'PROGRESS') {
+      if (typeof updateProgress === 'function') {
+        updateProgress(
+          e.data.step,
+          e.data.percent,
+          e.data.received,
+          e.data.total,
+          e.data.jobId,
+          e.data
+        );
+      }
+      return;
+    }
+
+    if (id && pending.has(id)) {
+      const { resolve, reject } = pending.get(id);
+      pending.delete(id);
+      if (type === 'OK') resolve(data);
+      else reject(new Error(error || '请求失败'));
+    }
+  });
+
+  /** 轻请求超时 20s（接口卡死时快速报错）；下载等长任务由调用方传 timeout 覆盖 */
+  function agentCall(type, payload, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const id = 'req-' + (++reqId);
+      pending.set(id, { resolve, reject });
+      window.postMessage({ source: PANEL, id, type, ...payload }, '*');
+      // 下载与合成没有固定时长上限；传 0 时只由用户取消或页面卸载结束。
+      const limit = timeoutMs === 0 ? 0 : (Number(timeoutMs) > 0 ? timeoutMs : 20000);
+      if (limit > 0) {
+        setTimeout(() => {
+          if (pending.has(id)) {
+            pending.delete(id);
+            reject(new Error('页面代理超时，请刷新页面重试'));
+          }
+        }, limit);
+      }
+    });
+  }
+
+  function agentSignal(type, extra = {}) {
+    window.postMessage({ source: PANEL, type, ...extra }, '*');
+  }
+
+  let debugLog = (step, msg) => console.log('[BiliDL]', step, msg);
+  let showStatus, updateProgress;
+
+  function mountUI() {
+    if (document.getElementById('bili-dl-panel-root')) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'bili-dl-panel-root';
+    panel.appendChild(createFragment(`
+      <div id="bili-dl-panel" data-theme="bilibili">
+        <div id="bili-dl-menu" class="hidden">
+          <div class="bili-dl-header">
+            <div class="bili-dl-header-left">
+              <img class="bili-dl-header-icon" src="${ICON_URL}" alt="" width="22" height="22">
+              <span class="bili-dl-title" data-i18n="appTitle">B站bilibili下载助手</span>
+              <span class="bili-dl-version">v${VERSION}</span>
+            </div>
+            <button id="bili-dl-close" data-i18n-aria="close" aria-label="关闭">&times;</button>
+          </div>
+          <div id="bili-dl-home">
+          <div id="bili-dl-mode-tabs" class="bili-dl-mode-tabs hidden" role="tablist" data-i18n-aria="modeLabel" aria-label="下载模式">
+            <button type="button" data-mode="video" class="active" role="tab" aria-selected="true" data-i18n="singleVideo">单视频</button>
+            <button type="button" data-mode="list" role="tab" aria-selected="false" data-i18n="listDownload">列表下载</button>
+          </div>
+          <div id="bili-dl-video-body" class="bili-dl-body">
+            <div id="bili-dl-video-card" class="bili-dl-video-card">
+              <div class="bili-dl-cover-column">
+                <div class="bili-dl-cover-wrap">
+                  <div id="bili-dl-cover-sk" class="bili-dl-sk-cover bili-dl-shimmer"></div>
+                  <img id="bili-dl-cover" class="bili-dl-cover hidden" alt="">
+                  <div id="bili-dl-cover-ph" class="bili-dl-cover-ph hidden">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                  </div>
+                </div>
+                <button id="bili-dl-download-cover" type="button" class="bili-dl-cover-download" disabled data-i18n="coverDownload">下载封面</button>
+              </div>
+              <div class="bili-dl-video-meta">
+                <div id="bili-dl-video-sk" class="bili-dl-video-sk">
+                  <span class="bili-dl-sk-line bili-dl-shimmer"></span>
+                  <span class="bili-dl-sk-line bili-dl-shimmer short"></span>
+                  <span class="bili-dl-sk-line bili-dl-shimmer shorter"></span>
+                </div>
+                <div id="bili-dl-video-content" class="bili-dl-video-content hidden">
+                  <div id="bili-dl-video-title" class="bili-dl-video-title"></div>
+                  <div id="bili-dl-video-author" class="bili-dl-video-author hidden"></div>
+                  <div id="bili-dl-video-sub" class="bili-dl-video-sub"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="bili-dl-pages" class="bili-dl-pages hidden"></div>
+
+            <div class="bili-dl-section">
+              <div class="bili-dl-section-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                <span data-i18n="quality">清晰度</span>
+              </div>
+              <div id="bili-dl-quality-pills" class="bili-dl-quality-pills">
+                <span class="bili-dl-pill loading" data-i18n="loading">加载中</span>
+              </div>
+              <label class="bili-dl-quality-strategy-row"><span data-i18n="qualityStrategy">清晰度策略</span>
+                <select id="bili-dl-quality-strategy" data-i18n-aria="qualityStrategy" aria-label="单视频清晰度策略">
+                  <option value="exact" data-i18n="qualityExact">使用所选清晰度</option>
+                  <option value="highest" data-i18n="qualityHighest">始终最高可用</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="bili-dl-format-row" class="bili-dl-format-row bili-dl-section">
+              <div class="bili-dl-section-head bili-dl-format-label" data-i18n="format">格式</div>
+              <div id="bili-dl-format-pills" class="bili-dl-format-pills">
+                <button type="button" class="bili-dl-pill active" data-format="mp4" data-i18n="mp4">MP4 视频</button>
+                <button type="button" class="bili-dl-pill" data-format="m4a" data-i18n="m4a">M4A 音频</button>
+              </div>
+            </div>
+            <label class="bili-dl-stream-preference-row"><span data-i18n="streamPreference">视频质量</span>
+              <select id="bili-dl-stream-preference" data-i18n-aria="streamPreference" data-i18n-title="streamPreferenceTitle" aria-label="视频流选择偏好" title="仅在同一清晰度的原始视频流之间选择">
+                <option value="high-bitrate" data-i18n="streamHighBitrate">高码率优先（推荐）</option>
+                <option value="compatible" data-i18n="streamCompatible">兼容优先</option>
+              </select>
+            </label>
+            <p id="bili-dl-filename-preview" class="bili-dl-filename-preview" aria-live="polite"></p>
+
+            <div id="bili-dl-estimate" class="bili-dl-estimate hidden">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+              <span id="bili-dl-estimate-text" data-i18n="estimateEmpty">预计大小 —</span>
+            </div>
+
+            <button id="bili-dl-start" class="bili-dl-btn" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+              <span data-i18n="startDownload">开始下载</span>
+            </button>
+            <button id="bili-dl-queue-all" type="button" class="bili-dl-btn bili-dl-btn-secondary hidden">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+              <span id="bili-dl-queue-label" data-i18n="queueAllParts">队列下载全部分 P</span>
+            </button>
+            <div id="bili-dl-video-job-panel" class="bili-dl-job-panel hidden">
+              <div id="bili-dl-job-list" class="bili-dl-job-list"></div>
+              <div id="bili-dl-queue-actions" class="bili-dl-job-panel-queue hidden">
+                <button id="bili-dl-queue-pause" type="button" class="bili-dl-action-btn" data-i18n="pauseAll">暂停全部</button>
+                <button id="bili-dl-queue-cancel" type="button" class="bili-dl-action-btn danger" data-i18n="cancelQueue">取消整队</button>
+              </div>
+            </div>
+            <div id="bili-dl-status" class="bili-dl-status hidden"></div>
+          </div>
+          <div id="bili-dl-list-body" class="bili-dl-list-body hidden">
+            <div id="bili-dl-space-profile" class="bili-dl-space-profile hidden"></div>
+            <div class="bili-dl-section">
+              <div class="bili-dl-section-head" data-i18n="quality">清晰度</div>
+              <div id="bili-dl-list-quality-pills" class="bili-dl-quality-pills">
+                <span class="bili-dl-pill loading" data-i18n="loading">加载中</span>
+              </div>
+              <label class="bili-dl-quality-strategy-row"><span data-i18n="qualityStrategy">清晰度策略</span>
+                <select id="bili-dl-list-quality-strategy" data-i18n-aria="qualityStrategy" aria-label="列表下载清晰度策略">
+                  <option value="exact" data-i18n="qualityExact">使用所选清晰度</option>
+                  <option value="highest" data-i18n="qualityHighest">始终最高可用</option>
+                </select>
+              </label>
+            </div>
+            <div id="bili-dl-list-download-kind-row" class="bili-dl-list-download-kind-row" role="group" data-i18n-aria="listDownloadKind" aria-label="列表下载内容">
+              <div class="bili-dl-section-head" data-i18n="listDownloadKind">下载内容</div>
+              <div id="bili-dl-list-download-kind" class="bili-dl-list-download-kind">
+                <label><input type="checkbox" data-list-content="video" checked><span data-i18n="listContentVideo">视频</span></label>
+                <label><input type="checkbox" data-list-content="audio"><span data-i18n="listContentAudio">音频</span></label>
+                <label><input type="checkbox" data-list-content="cover"><span data-i18n="listContentCover">封面</span></label>
+              </div>
+            </div>
+            <label class="bili-dl-stream-preference-row"><span data-i18n="streamPreference">视频质量</span>
+              <select id="bili-dl-list-stream-preference" data-i18n-aria="streamPreference" data-i18n-title="streamPreferenceTitle" aria-label="列表视频流选择偏好" title="仅在同一清晰度的原始视频流之间选择">
+                <option value="high-bitrate" data-i18n="streamHighBitrate">高码率优先（推荐）</option>
+                <option value="compatible" data-i18n="streamCompatible">兼容优先</option>
+              </select>
+            </label>
+            <div class="bili-dl-list-tools" role="search">
+              <input id="bili-dl-list-search" type="search" maxlength="80" data-i18n-placeholder="listSearchPlaceholder" data-i18n-aria="listSearchPlaceholder" placeholder="搜索已加载视频标题" aria-label="搜索已加载视频标题">
+              <div class="bili-dl-list-filter" role="group" data-i18n-aria="listFilter" aria-label="列表筛选">
+                <button id="bili-dl-list-refresh-page" type="button" class="bili-dl-list-refresh-page hidden" data-i18n="refreshCurrentPage" data-i18n-title="refreshCurrentPageTitle" title="重新读取当前页的视频列表">刷新列表</button>
+                <span id="bili-dl-list-filter-sep" class="bili-dl-list-filter-sep hidden" aria-hidden="true">|</span>
+                <button type="button" data-list-filter="all" class="active" data-i18n="filterAll">全部</button>
+                <button type="button" data-list-filter="selected" data-i18n="filterSelected">已选</button>
+              </div>
+              <select id="bili-dl-list-sort" data-i18n-aria="videoList" aria-label="列表排序">
+                <option value="default" data-i18n="sortDefault">默认</option>
+                <option value="newest" data-i18n="sortNewest">最新</option>
+                <option value="oldest" data-i18n="sortOldest">最早</option>
+              </select>
+            </div>
+            <div id="bili-dl-list-head" class="bili-dl-list-head">
+              <div class="bili-dl-list-heading"><strong id="bili-dl-list-title" data-i18n="videoList">视频列表</strong><span id="bili-dl-list-count"></span></div>
+              <button id="bili-dl-list-select-all" type="button" data-i18n="selectAll" data-i18n-title="selectAllTitle" title="选择当前已加载的所有视频">全选</button>
+            </div>
+            <div id="bili-dl-list-items" class="bili-dl-list-items"></div>
+            <button id="bili-dl-list-load-more" type="button" class="bili-dl-btn bili-dl-btn-secondary hidden" data-i18n="loadMore">继续加载</button>
+            <button id="bili-dl-list-start" type="button" class="bili-dl-btn" disabled data-i18n="downloadSelected">下载已选视频</button>
+            <div id="bili-dl-list-job-panel" class="bili-dl-job-panel hidden">
+              <div id="bili-dl-list-job-list" class="bili-dl-job-list"></div>
+              <div id="bili-dl-list-queue-actions" class="bili-dl-job-panel-queue hidden">
+                <button id="bili-dl-list-queue-pause" type="button" class="bili-dl-action-btn" data-i18n="pauseAll">暂停全部</button>
+                <button id="bili-dl-list-queue-cancel" type="button" class="bili-dl-action-btn danger" data-i18n="cancelQueue">取消整队</button>
+              </div>
+            </div>
+            <div id="bili-dl-list-result" class="bili-dl-list-result hidden">
+              <p id="bili-dl-list-status" class="bili-dl-list-status" aria-live="polite"></p>
+              <button id="bili-dl-list-retry-failed" type="button" class="bili-dl-list-retry hidden" data-i18n="retryIncomplete">重试未完成</button>
+            </div>
+          </div>
+          <div class="bili-dl-footer">
+            <button type="button" class="bili-dl-footer-action" data-sheet="settings" data-i18n-title="settings" title="设置">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></svg>
+              <span data-i18n="settings">设置</span>
+            </button>
+            <div class="bili-dl-footer-links">
+              <button type="button" class="bili-dl-footer-link" data-sheet="diagnostics" data-i18n="diagnostics">诊断日志</button>
+              <button type="button" class="bili-dl-footer-link" data-sheet="tasks" data-i18n="tasks">任务中心</button>
+            </div>
+          </div>
+          </div>
+          <div id="bili-dl-page" class="bili-dl-page hidden">
+            <button type="button" id="bili-dl-page-back" class="bili-dl-page-back" data-i18n="backToDownload">返回下载</button>
+            <h3 id="bili-dl-info-title" class="bili-dl-page-title"></h3>
+            <p id="bili-dl-info-date" class="bili-dl-info-date hidden"></p>
+            <div id="bili-dl-info-body" class="bili-dl-info-body"></div>
+          </div>
+        </div>
+      </div>
+    `));
+    document.documentElement.appendChild(panel);
+
+    const themedPanel = panel.querySelector('#bili-dl-panel');
+    document.addEventListener('pointerdown', (event) => {
+      const themeControl = panel.querySelector('.bili-dl-settings-theme-control');
+      if (!themeControl || themeControl.contains(event.target)) return;
+      const themeOptions = themeControl.querySelector('.bili-dl-settings-theme-options');
+      const themeTrigger = themeControl.querySelector('.bili-dl-settings-theme-trigger');
+      themeOptions?.classList.add('hidden');
+      themeTrigger?.setAttribute('aria-expanded', 'false');
+    });
+    function applyTheme(value) {
+      const Theme = globalThis.BiliDlTheme;
+      if (!Theme) return 'bilibili';
+      const themeId = Theme.applyToRoot(themedPanel, value);
+      const themeControl = panel.querySelector('.bili-dl-settings-theme-control');
+      if (themeControl) Theme.syncPicker(themeControl, themedPanel, themeId);
+      return themeId;
+    }
+
+    const menu = panel.querySelector('#bili-dl-menu');
+    const closeBtn = panel.querySelector('#bili-dl-close');
+    const modeTabsEl = panel.querySelector('#bili-dl-mode-tabs');
+    const videoBodyEl = panel.querySelector('#bili-dl-video-body');
+    const listBodyEl = panel.querySelector('#bili-dl-list-body');
+    const listHeadEl = panel.querySelector('#bili-dl-list-head');
+    const listTitleEl = panel.querySelector('#bili-dl-list-title');
+    const listCountEl = panel.querySelector('#bili-dl-list-count');
+    const listSelectAllBtn = panel.querySelector('#bili-dl-list-select-all');
+    const listItemsEl = panel.querySelector('#bili-dl-list-items');
+    const listSearchEl = panel.querySelector('#bili-dl-list-search');
+    const listFilterEl = panel.querySelector('.bili-dl-list-filter');
+    const listRefreshPageBtn = panel.querySelector('#bili-dl-list-refresh-page');
+    const listFilterSepEl = panel.querySelector('#bili-dl-list-filter-sep');
+    const listSortEl = panel.querySelector('#bili-dl-list-sort');
+    const listLoadMoreBtn = panel.querySelector('#bili-dl-list-load-more');
+    const listStartBtn = panel.querySelector('#bili-dl-list-start');
+    const listPillsEl = panel.querySelector('#bili-dl-list-quality-pills');
+    const listQualitySection = listPillsEl?.closest('.bili-dl-section');
+    const listDownloadKindEl = panel.querySelector('#bili-dl-list-download-kind');
+    const listJobPanelEl = panel.querySelector('#bili-dl-list-job-panel');
+    const listQueuePauseBtn = panel.querySelector('#bili-dl-list-queue-pause');
+    const listQueueCancelBtn = panel.querySelector('#bili-dl-list-queue-cancel');
+    const listQueueActionsEl = panel.querySelector('#bili-dl-list-queue-actions');
+    const listJobListEl = panel.querySelector('#bili-dl-list-job-list');
+    const listRetryFailedBtn = panel.querySelector('#bili-dl-list-retry-failed');
+    const listResultEl = panel.querySelector('#bili-dl-list-result');
+    const listStatusEl = panel.querySelector('#bili-dl-list-status');
+    const videoCard = panel.querySelector('#bili-dl-video-card');
+    const coverSk = panel.querySelector('#bili-dl-cover-sk');
+    const coverImg = panel.querySelector('#bili-dl-cover');
+    const coverPh = panel.querySelector('#bili-dl-cover-ph');
+    const videoSk = panel.querySelector('#bili-dl-video-sk');
+    const videoContent = panel.querySelector('#bili-dl-video-content');
+    const titleEl = panel.querySelector('#bili-dl-video-title');
+    const authorEl = panel.querySelector('#bili-dl-video-author');
+    const subEl = panel.querySelector('#bili-dl-video-sub');
+    const pagesEl = panel.querySelector('#bili-dl-pages');
+    const pillsEl = panel.querySelector('#bili-dl-quality-pills');
+    const qualitySection = pillsEl?.closest('.bili-dl-section');
+    const qualityStrategyEls = [
+      panel.querySelector('#bili-dl-quality-strategy'),
+      panel.querySelector('#bili-dl-list-quality-strategy')
+    ].filter(Boolean);
+    const streamPreferenceEls = [
+      panel.querySelector('#bili-dl-stream-preference'),
+      panel.querySelector('#bili-dl-list-stream-preference')
+    ].filter(Boolean);
+    const formatPillsEl = panel.querySelector('#bili-dl-format-pills');
+    const formatRowEl = panel.querySelector('#bili-dl-format-row');
+    const filenamePreviewEl = panel.querySelector('#bili-dl-filename-preview');
+    const estimateEl = panel.querySelector('#bili-dl-estimate');
+    const estimateText = panel.querySelector('#bili-dl-estimate-text');
+    // 预估大小来自异步接口。用递增编号忽略旧响应，避免切换页签后旧响应再把区域撑开。
+    let estimateRequestId = 0;
+    let currentEstimateBytes = 0;
+    const startBtn = panel.querySelector('#bili-dl-start');
+    const coverDownloadBtn = panel.querySelector('#bili-dl-download-cover');
+    const queueBtn = panel.querySelector('#bili-dl-queue-all');
+    const queuePauseBtn = panel.querySelector('#bili-dl-queue-pause');
+    const queueCancelBtn = panel.querySelector('#bili-dl-queue-cancel');
+    const queueActionsEl = panel.querySelector('#bili-dl-queue-actions');
+    const queueLabelEl = panel.querySelector('#bili-dl-queue-label');
+    const videoJobPanelEl = panel.querySelector('#bili-dl-video-job-panel');
+    const jobListEl = panel.querySelector('#bili-dl-job-list');
+    const statusEl = panel.querySelector('#bili-dl-status');
+    const homeEl = panel.querySelector('#bili-dl-home');
+    const pageEl = panel.querySelector('#bili-dl-page');
+    const pageBack = panel.querySelector('#bili-dl-page-back');
+    const infoTitle = panel.querySelector('#bili-dl-info-title');
+    const infoDate = panel.querySelector('#bili-dl-info-date');
+    const infoBody = panel.querySelector('#bili-dl-info-body');
+    const defaultStartBtnNodes = Array.from(startBtn.childNodes).map((node) => node.cloneNode(true));
+    let listItems = [];
+    let spaceQualityTier = 'highest';
+    let listTotal = 0;
+    let collectionHref = '';
+    let selectedListKeys = new Set();
+    let listLoaded = false;
+    let listViewRevision = 0;
+    let pendingListSync = false;
+    let listSyncTimer;
+    let lastSpaceViewKey = '';
+    let listCursor = null;
+    let listHasMore = false;
+    let listLoading = false;
+    let listQuery = '';
+    let listFilter = 'all';
+    let listSort = 'default';
+    let lastListFailures = [];
+    function incompleteKey() {
+      return 'biliDlIncomplete_v1:' + location.origin + location.pathname.replace(/\/$/, '');
+    }
+    async function restoreIncompleteTasks() {
+      const key = incompleteKey();
+      try {
+        const data = await EXT.storage.local.get(key);
+        if (queueRunning || key !== incompleteKey()) return;
+        lastListFailures = Array.isArray(data[key])
+          ? data[key].filter(entry => entry?.item?.bvid && entry.downloadKind).map((entry, index) => ({ ...entry, batchIndex: entry.batchIndex ?? entry.index ?? index + 1, checkpointKey: key }))
+          : [];
+        updateListRetryFailed();
+      } catch (error) { debugLog('队列', '恢复未完成任务失败：' + error.message); }
+    }
+
+    let activeMode = 'video';
+    let panelOpening = null;
+    let videoSourceRevision = 0;
+    let pickingVideoDirectory = false;
+    let operationMode = null;
+    const debugEntries = [];
+    const taskHistory = [];
+
+    function redactDiagnosticText(value) {
+      return String(value || '')
+        .replace(/https?:\/\/[^\s]+/gi, (url) => {
+          try {
+            const parsed = new URL(url);
+            return `${parsed.origin}/[地址已隐藏]`;
+          } catch { return '[地址已隐藏]'; }
+        })
+        .replace(/((?:SESSDATA|bili_jct|access_token|token|w_rid|sign)=)[^\s&]+/gi, '$1[已隐藏]');
+    }
+
+    debugLog = (step, msg) => {
+      const entry = { time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), step: redactDiagnosticText(step), msg: redactDiagnosticText(msg) };
+      debugEntries.push(entry);
+      if (debugEntries.length > 100) debugEntries.splice(0, debugEntries.length - 100);
+      console.log('[BiliDL]', entry.step, entry.msg);
+    };
+
+    function recordTask(job) {
+      if (!job || job.recorded || ![TASK_STATE.completed, TASK_STATE.failed, TASK_STATE.cancelled].includes(job.state)) return;
+      job.recorded = true;
+      const finishedAt = Date.now();
+      const { cardEl, blob, mp4, ...metadata } = job;
+      taskHistory.unshift({ ...metadata, info: { ...job.info }, phaseTimes: { ...job.phaseTimes }, finishedAt, elapsedMs: finishedAt - job.createdAt });
+      if (taskHistory.length > 50) taskHistory.length = 50;
+    }
+
+    function formatTaskTimings(job) {
+      const started = Number(job?.createdAt) || Date.now();
+      const entries = Object.entries(job?.phaseTimes || {})
+        .map(([phase, at]) => [phase, Math.max(0, Math.round((Number(at) - started) / 1000))])
+        .sort((a, b) => a[1] - b[1]);
+      return entries.length ? entries.map(([phase, seconds]) => `${phase} +${seconds}s`).join(' · ') : t('taskTimingNone');
+    }
+
+    async function openBrowserDownloads() {
+      const result = await EXT.runtime.sendMessage({ type: 'BILI_DL_OPEN_DOWNLOADS' }).catch(() => null);
+      if (!result?.ok) debugLog('任务中心', `打开下载内容失败：${result?.error || '浏览器拒绝请求'}`);
+    }
+
+    function restoreStartButtonContent() {
+      startBtn.replaceChildren(...defaultStartBtnNodes.map((node) => node.cloneNode(true)));
+    }
+
+    async function fillSettingsSheet(el) {
+      const Filename = globalThis.BiliDlFilename;
+      const Settings = globalThis.BiliDlSettings;
+      clearNode(el);
+      if (!Filename || !Settings) {
+        appendTextElement(el, 'p', '', t('settingsLoadFailed'));
+        return;
+      }
+
+      const root = document.createElement('div');
+      root.className = 'bili-dl-settings';
+
+      const themeRow = document.createElement('div');
+      themeRow.className = 'bili-dl-settings-row';
+      appendTextElement(themeRow, 'span', '', t('theme'));
+      const themeControl = document.createElement('div');
+      themeControl.className = 'bili-dl-settings-theme-control';
+      const themeTrigger = document.createElement('button');
+      themeTrigger.type = 'button';
+      themeTrigger.className = 'bili-dl-settings-theme-trigger';
+      themeTrigger.setAttribute('aria-label', t('theme'));
+      themeTrigger.setAttribute('aria-haspopup', 'listbox');
+      themeTrigger.setAttribute('aria-expanded', 'false');
+      const currentSwatch = document.createElement('span');
+      currentSwatch.className = 'bili-dl-settings-theme-swatch bili-dl-settings-theme-current-swatch';
+      currentSwatch.setAttribute('aria-hidden', 'true');
+      const currentLabel = document.createElement('span');
+      currentLabel.className = 'bili-dl-settings-theme-current-label';
+      const chevron = document.createElement('span');
+      chevron.className = 'bili-dl-settings-theme-chevron';
+      chevron.setAttribute('aria-hidden', 'true');
+      themeTrigger.append(currentSwatch, currentLabel, chevron);
+      const themeOptions = document.createElement('div');
+      themeOptions.className = 'bili-dl-settings-theme-options hidden';
+      themeOptions.id = 'bili-dl-settings-theme-options';
+      themeOptions.setAttribute('role', 'listbox');
+      themeTrigger.setAttribute('aria-controls', themeOptions.id);
+      const Theme = globalThis.BiliDlTheme;
+      await Theme?.loadThemes?.();
+      const themeEntries = Theme?.listEntries?.() || [['bilibili', '默认', '']];
+      themeEntries.forEach(([value, label]) => {
+        const display = themeDisplayName(value, label);
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'bili-dl-settings-theme-option';
+        option.dataset.themeOption = value;
+        option.dataset.label = display;
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(themedPanel.dataset.theme === value));
+        const swatch = document.createElement('span');
+        swatch.className = 'bili-dl-settings-theme-swatch';
+        swatch.dataset.theme = value;
+        swatch.setAttribute('aria-hidden', 'true');
+        Theme?.styleSwatch?.(swatch, value);
+        const optionLabel = document.createElement('span');
+        optionLabel.textContent = display;
+        option.append(swatch, optionLabel);
+        option.onclick = async () => {
+          const previous = themedPanel.dataset.theme;
+          const themeId = applyTheme(value);
+          themeOptions.classList.add('hidden');
+          themeTrigger.setAttribute('aria-expanded', 'false');
+          try {
+            await EXT.storage.local.set({ [THEME_PREF_KEY]: themeId });
+            status.textContent = t('themeSaved');
+          } catch (error) {
+            applyTheme(previous);
+            status.textContent = error?.message || t('themeSaveFailed');
+          }
+        };
+        themeOptions.appendChild(option);
+      });
+      themeTrigger.onclick = () => {
+        const willOpen = themeOptions.classList.contains('hidden');
+        closeSettingsPickers();
+        if (willOpen) {
+          themeOptions.classList.remove('hidden');
+          themeTrigger.setAttribute('aria-expanded', 'true');
+        }
+      };
+      themeTrigger.onkeydown = (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          themeOptions.classList.remove('hidden');
+          themeTrigger.setAttribute('aria-expanded', 'true');
+          const selected = themeOptions.querySelector('[aria-selected="true"]');
+          (selected || themeOptions.firstElementChild)?.focus();
+        }
+      };
+      themeOptions.onkeydown = (event) => {
+        const options = [...themeOptions.querySelectorAll('[data-theme-option]')];
+        const index = options.indexOf(event.target.closest('[data-theme-option]'));
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          themeOptions.classList.add('hidden');
+          themeTrigger.setAttribute('aria-expanded', 'false');
+          themeTrigger.focus();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          const direction = event.key === 'ArrowDown' ? 1 : -1;
+          options[(index + direction + options.length) % options.length]?.focus();
+        }
+      };
+      themeControl.append(themeTrigger, themeOptions);
+      themeRow.appendChild(themeControl);
+      root.appendChild(themeRow);
+
+      function closeSettingsPickers() {
+        root.querySelectorAll('.bili-dl-settings-theme-options').forEach((list) => list.classList.add('hidden'));
+        root.querySelectorAll('.bili-dl-settings-theme-trigger').forEach((button) => {
+          button.setAttribute('aria-expanded', 'false');
+        });
+      }
+
+      function createSettingsPicker({ ariaLabel, options, value, onChange }) {
+        const control = document.createElement('div');
+        control.className = 'bili-dl-settings-theme-control';
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'bili-dl-settings-theme-trigger';
+        trigger.setAttribute('aria-label', ariaLabel);
+        trigger.setAttribute('aria-haspopup', 'listbox');
+        trigger.setAttribute('aria-expanded', 'false');
+        const labelEl = document.createElement('span');
+        labelEl.className = 'bili-dl-settings-theme-current-label';
+        const chevron = document.createElement('span');
+        chevron.className = 'bili-dl-settings-theme-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        trigger.append(labelEl, chevron);
+        const list = document.createElement('div');
+        list.className = 'bili-dl-settings-theme-options hidden';
+        list.setAttribute('role', 'listbox');
+        let current = value;
+        const picker = {
+          root: control,
+          get value() { return current; },
+          set value(next) {
+            current = next;
+            const selected = options.find((item) => item.value === current) || options[0];
+            labelEl.textContent = selected?.label || '';
+            list.querySelectorAll('[data-value]').forEach((node) => {
+              node.setAttribute('aria-selected', String(node.dataset.value === current));
+            });
+          },
+          onchange: null
+        };
+        options.forEach((item) => {
+          const option = document.createElement('button');
+          option.type = 'button';
+          option.className = 'bili-dl-settings-theme-option';
+          option.dataset.value = item.value;
+          option.setAttribute('role', 'option');
+          option.textContent = item.label;
+          option.onclick = () => {
+            picker.value = item.value;
+            closeSettingsPickers();
+            onChange?.(item.value);
+            picker.onchange?.();
+          };
+          list.appendChild(option);
+        });
+        trigger.onclick = () => {
+          const willOpen = list.classList.contains('hidden');
+          closeSettingsPickers();
+          if (willOpen) {
+            list.classList.remove('hidden');
+            trigger.setAttribute('aria-expanded', 'true');
+          }
+        };
+        control.append(trigger, list);
+        picker.value = value;
+        return picker;
+      }
+
+      if (panel.dataset.pickerDismiss !== '1') {
+        panel.dataset.pickerDismiss = '1';
+        document.addEventListener('pointerdown', (event) => {
+          if (event.target.closest('#bili-dl-panel .bili-dl-settings-theme-control')) return;
+          panel.querySelectorAll('.bili-dl-settings-theme-options').forEach((list) => list.classList.add('hidden'));
+          panel.querySelectorAll('.bili-dl-settings-theme-trigger').forEach((button) => {
+            button.setAttribute('aria-expanded', 'false');
+          });
+        });
+      }
+
+      const languageRow = document.createElement('div');
+      languageRow.className = 'bili-dl-settings-row';
+      appendTextElement(languageRow, 'span', '', t('language'));
+      const storedLanguage = globalThis.BiliDlI18n?.preference?.();
+      const languagePicker = createSettingsPicker({
+        ariaLabel: t('language'),
+        value: globalThis.BiliDlI18n?.languageOptions?.().some((option) => option.code === storedLanguage)
+          ? storedLanguage
+          : (globalThis.BiliDlI18n?.language?.() || 'zh-CN'),
+        options: (globalThis.BiliDlI18n?.languageOptions?.() || []).map((option) => ({ value: option.code, label: option.label })),
+        onChange: (value) => {
+          globalThis.BiliDlI18n?.save?.(value)?.then(() => applyLanguage()).catch(() => {});
+        }
+      });
+      languageRow.appendChild(languagePicker.root);
+      root.appendChild(languageRow);
+
+      const concurrencyRow = document.createElement('div');
+      concurrencyRow.className = 'bili-dl-settings-row';
+      appendTextElement(concurrencyRow, 'span', '', t('batchConcurrency'));
+      const concurrencyPicker = createSettingsPicker({
+        ariaLabel: t('batchConcurrency'),
+        value: String(batchConcurrency),
+        options: [1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) }))
+      });
+      concurrencyPicker.onchange = () => queueSave();
+      concurrencyRow.appendChild(concurrencyPicker.root);
+      root.appendChild(concurrencyRow);
+
+      const presetRow = document.createElement('div');
+      presetRow.className = 'bili-dl-settings-row';
+      appendTextElement(presetRow, 'span', '', t('filename'));
+      const preset = createSettingsPicker({
+        ariaLabel: t('filenameRule'),
+        value: 'title',
+        options: [
+          { value: 'title', label: t('presetTitle') },
+          { value: 'title-bvid', label: t('presetTitleBvid') },
+          { value: 'title-bvid-quality', label: t('presetTitleBvidQuality') },
+          { value: 'detailed', label: t('presetDetailed') },
+          { value: 'custom', label: t('presetCustom') }
+        ]
+      });
+      presetRow.appendChild(preset.root);
+      root.appendChild(presetRow);
+
+      const customBlock = document.createElement('div');
+      customBlock.className = 'bili-dl-settings-custom';
+      customBlock.hidden = true;
+
+      const templateInput = document.createElement('input');
+      templateInput.type = 'text';
+      templateInput.className = 'bili-dl-settings-input';
+      templateInput.maxLength = 200;
+      templateInput.spellcheck = false;
+      templateInput.autocomplete = 'off';
+      templateInput.placeholder = '{title} - {bvid}';
+      templateInput.setAttribute('aria-label', t('customTemplate'));
+      customBlock.appendChild(templateInput);
+
+      const chips = document.createElement('div');
+      chips.className = 'bili-dl-settings-chips';
+      chips.setAttribute('aria-label', t('insertField'));
+      Filename.VARIABLES.forEach((item) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'bili-dl-settings-chip';
+        chip.textContent = t(FILENAME_CHIP_KEYS[item.key] || 'chipTitle');
+        chip.title = `{${item.key}} · ${item.tip}`;
+        chip.onclick = () => {
+          const start = templateInput.selectionStart ?? templateInput.value.length;
+          const end = templateInput.selectionEnd ?? templateInput.value.length;
+          const token = `{${item.key}}`;
+          templateInput.value = `${templateInput.value.slice(0, start)}${token}${templateInput.value.slice(end)}`;
+          const pos = start + token.length;
+          templateInput.focus();
+          templateInput.setSelectionRange(pos, pos);
+          syncPresetFromTemplate();
+          refreshPreview();
+          queueSave();
+        };
+        chips.appendChild(chip);
+      });
+      customBlock.appendChild(chips);
+      root.appendChild(customBlock);
+
+      const previewLine = document.createElement('div');
+      previewLine.className = 'bili-dl-settings-line';
+      const preview = document.createElement('p');
+      preview.className = 'bili-dl-settings-preview';
+      appendTextElement(preview, 'span', 'bili-dl-settings-preview-label', t('previewLabel'));
+      const previewNames = appendTextElement(preview, 'span', 'bili-dl-settings-preview-names', '—');
+      previewLine.appendChild(preview);
+      const foot = document.createElement('div');
+      foot.className = 'bili-dl-settings-foot';
+      const status = document.createElement('span');
+      status.className = 'bili-dl-settings-status';
+      const resetBtn = document.createElement('button');
+      resetBtn.type = 'button';
+      resetBtn.className = 'bili-dl-settings-reset';
+      resetBtn.textContent = t('resetFilename');
+      foot.append(status, resetBtn);
+      previewLine.appendChild(foot);
+      root.appendChild(previewLine);
+      const error = appendTextElement(root, 'p', 'bili-dl-settings-error', '');
+      error.hidden = true;
+
+      el.appendChild(root);
+      applyTheme(themedPanel.dataset.theme);
+
+      let saveTimer = 0;
+
+      function matchPreset(template) {
+        const value = String(template || '').trim();
+        for (const [key, tpl] of Object.entries(Filename.PRESETS)) {
+          if (tpl === value) return key;
+        }
+        return 'custom';
+      }
+
+      function syncCustomVisibility() {
+        customBlock.hidden = preset.value !== 'custom';
+      }
+
+      function syncPresetFromTemplate() {
+        // Keep the editor open while editing, even if the text matches a preset.
+        preset.value = 'custom';
+        syncCustomVisibility();
+      }
+
+      function currentTemplate() {
+        if (preset.value !== 'custom' && Filename.PRESETS[preset.value]) {
+          return Filename.PRESETS[preset.value];
+        }
+        return templateInput.value.trim();
+      }
+
+      function sampleMeta() {
+        return {
+          ...Settings.SAMPLE_META,
+          title: t('sampleTitle'),
+          author: t('sampleAuthor'),
+          partTitle: t('samplePartTitle')
+        };
+      }
+
+      function refreshPreview() {
+        const check = Filename.validateTemplate(currentTemplate());
+        if (!check.ok) {
+          error.hidden = false;
+          error.textContent = translateFilenameError(check.error);
+          previewNames.textContent = '—';
+          return false;
+        }
+        error.hidden = true;
+        error.textContent = '';
+        const meta = sampleMeta();
+        const videoName = Filename.withExtension(
+          Filename.renderTemplate(check.template, meta, {
+            format: 'mp4',
+            qualityLabel: '1080P',
+            index: 2
+          }),
+          'mp4'
+        );
+        const audioName = Filename.withExtension(
+          Filename.renderTemplate(check.template, meta, {
+            format: 'm4a',
+            qualityLabel: t('qualityLabelAudio'),
+            index: 2
+          }),
+          'm4a'
+        );
+        const videoStem = videoName.replace(/\.mp4$/i, '');
+        const audioStem = audioName.replace(/\.m4a$/i, '');
+        previewNames.textContent = videoStem === audioStem
+          ? `${videoName} · .m4a`
+          : `${videoName} · ${audioName}`;
+        return check.template;
+      }
+
+      function applyForm(settings) {
+        const template = settings.filenameTemplate || Settings.DEFAULTS.filenameTemplate;
+        concurrencyPicker.value = String(settings.batchConcurrency || Settings.DEFAULTS.batchConcurrency);
+        templateInput.value = template;
+        preset.value = matchPreset(template);
+        syncCustomVisibility();
+        refreshPreview();
+      }
+
+      async function persist(showOk) {
+        const template = refreshPreview();
+        if (!template) {
+          status.textContent = t('templateInvalid');
+          return;
+        }
+        try {
+          const saved = await Settings.saveSettings({
+            filenameTemplate: template,
+            batchConcurrency: Number(concurrencyPicker.value)
+          });
+          applyFilenameSettings(saved);
+          if (showOk) status.textContent = t('saved');
+          else status.textContent = '';
+        } catch (err) {
+          status.textContent = translateUserError(err?.message) || t('saveFailed');
+        }
+      }
+
+      function queueSave() {
+        status.textContent = '';
+        clearTimeout(saveTimer);
+        const check = Filename.validateTemplate(currentTemplate());
+        if (!check.ok) return;
+        // New jobs must use the visible valid template before storage completes.
+        applyFilenameSettings({ filenameTemplate: check.template, batchConcurrency: Number(concurrencyPicker.value) });
+        saveTimer = setTimeout(() => { persist(true); }, 280);
+      }
+
+      preset.onchange = () => {
+        if (preset.value !== 'custom' && Filename.PRESETS[preset.value]) {
+          templateInput.value = Filename.PRESETS[preset.value];
+        } else if (preset.value === 'custom' && Filename.PRESETS[matchPreset(templateInput.value)]) {
+          // keep current text for editing
+        }
+        syncCustomVisibility();
+        refreshPreview();
+        queueSave();
+      };
+      templateInput.oninput = () => {
+        syncPresetFromTemplate();
+        refreshPreview();
+        queueSave();
+      };
+      resetBtn.onclick = async () => {
+        clearTimeout(saveTimer);
+        try {
+          const defaults = await Settings.resetSettings();
+          applyFilenameSettings(defaults);
+          applyForm(defaults);
+          status.textContent = t('restoredDefault');
+        } catch (err) {
+          status.textContent = translateUserError(err?.message) || t('resetFailed');
+        }
+      };
+
+      Settings.loadSettings().then(applyForm).catch((err) => {
+        status.textContent = translateUserError(err?.message) || t('loadFailedSettings');
+      });
+    }
+
+    let lastInfoSheetKey = '';
+
+    function refreshDynamicUi() {
+      if (isSpacePage()) renderSpaceQuality();
+      if (qualities.length) renderQualityPills(qualities);
+      refreshFilenamePreview();
+      setQueueLabel(videoInfo?.pages?.length || 0);
+      updateListSelection();
+      updateListLoadMore();
+      updateListRetryFailed();
+      activeJobs.forEach((job) => {
+        if (!job.cardEl) return;
+        const pause = job.cardEl.querySelector('.bili-dl-job-pause');
+        const cancel = job.cardEl.querySelector('.bili-dl-job-cancel');
+        const cancelInline = job.cardEl.querySelector('.bili-dl-job-cancel-inline');
+        if (pause) pause.textContent = job.paused ? t('jobResume') : t('jobPause');
+        if (cancel) cancel.textContent = t('jobCancel');
+        if (cancelInline) cancelInline.textContent = t('jobCancel');
+      });
+      Object.values(taskUi).forEach(({ queuePause, queueCancel }) => {
+        if (queuePause && !queuePaused) queuePause.textContent = t('pauseAll');
+        if (queueCancel && !queueCancelled) queueCancel.textContent = t('cancelQueue');
+      });
+      if (videoInfo && titleEl) {
+        const parts = [];
+        if (videoInfo.view) parts.push(formatView(videoInfo.view) + ' ' + t('unitPlay'));
+        if (videoInfo.pubdate) parts.push(formatTime(videoInfo.pubdate));
+        subEl.textContent = parts.length ? parts.join(' · ') : t('biliVideo');
+      }
+      if (lastInfoSheetKey) {
+        if (lastInfoSheetKey === 'settings') {
+          const infoBodyEl = panel.querySelector('#bili-dl-info-body');
+          if (infoBodyEl?.querySelector('.bili-dl-settings')) renderInfoSheet('settings');
+        } else {
+          renderInfoSheet(lastInfoSheetKey);
+        }
+      }
+    }
+
+    function applyLanguage() {
+      const root = document.getElementById('bili-dl-panel');
+      globalThis.BiliDlI18n?.apply(root);
+      refreshDynamicUi();
+    }
+
+    function renderInfoSheet(key) {
+      lastInfoSheetKey = key;
+      if (key === 'settings') {
+        infoTitle.textContent = t('settings');
+        infoDate.textContent = '';
+        infoDate.classList.add('hidden');
+        void fillSettingsSheet(infoBody);
+        return;
+      }
+      if (key === 'tasks') {
+        infoTitle.textContent = t('tasks');
+        infoDate.textContent = t('tasksSummary', { active: activeJobs.size, history: taskHistory.length });
+        infoDate.classList.remove('hidden');
+        const render = (filter = 'all') => {
+          clearNode(infoBody);
+          const filters = [['all', t('taskFilterAll')], ['active', t('taskFilterActive')], ['completed', t('taskFilterCompleted')], ['failed', t('taskFilterFailed')], ['cancelled', t('taskFilterCancelled')]];
+          const tools = document.createElement('div');
+          tools.className = 'bili-dl-task-filters';
+          filters.forEach(([value, label]) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.classList.toggle('active', value === filter); button.onclick = () => render(value); tools.appendChild(button); });
+          infoBody.appendChild(tools);
+          const rows = [...activeJobs.values(), ...taskHistory].filter((job) => filter === 'all' || (filter === 'active' ? ![TASK_STATE.completed, TASK_STATE.failed, TASK_STATE.cancelled].includes(job.state) : job.state === filter));
+          if (!rows.length) { appendTextElement(infoBody, 'p', 'bili-dl-list-empty', t('tasksEmpty')); return; }
+          rows.forEach((job) => {
+            const row = document.createElement('div');
+            row.className = 'bili-dl-task-row';
+            appendTextElement(row, 'strong', '', job.info?.title || t('videoFallback'));
+            const elapsed = Math.max(0, Math.round(((job.finishedAt || Date.now()) - job.createdAt) / 1000));
+            appendTextElement(row, 'span', '', `${job.state || 'downloading'} · ${elapsed}s${job.error?.message ? `：${translateUserError(job.error.message)}` : ''}`);
+            appendTextElement(row, 'small', '', formatTaskTimings(job));
+            if (job.state === TASK_STATE.failed) {
+              const retry = appendTextElement(row, 'button', '', t('retryTask'));
+              retry.type = 'button';
+              retry.onclick = (event) => {
+                showHome();
+                if (job.retryTask) void startListDownload([job.retryTask], event);
+                else if (job.retryPart) void startQueueDownload([job.retryPart], event);
+                else void launchVideoTask(job, event);
+              };
+            }
+            if (job.state === TASK_STATE.completed && !job.directorySave) {
+              const locate = appendTextElement(row, 'button', '', t('taskOpenDownload'));
+              locate.type = 'button';
+              locate.onclick = openBrowserDownloads;
+            }
+            infoBody.appendChild(row);
+          });
+        };
+        render();
+        return;
+      }
+      if (key === 'diagnostics') {
+        infoTitle.textContent = t('diagnostics');
+        infoDate.textContent = t('diagnosticsDate', { count: debugEntries.length });
+        infoDate.classList.remove('hidden');
+        clearNode(infoBody);
+        const locale = globalThis.BiliDlI18n?.language?.() || 'zh-CN';
+        const timingLines = [...activeJobs.values(), ...taskHistory].map((job) => t('diagnosticsTaskLine', {
+          title: job.info?.title || t('videoFallback'),
+          state: job.state,
+          timings: formatTaskTimings(job)
+        }));
+        const report = [t('diagnosticsReportTitle'), `时间：${new Date().toLocaleString(locale)}`, `页面：${location.pathname}`, '', t('diagnosticsTaskTimings'), ...(timingLines.length ? timingLines : [t('diagnosticsNoTasks')]), '', t('diagnosticsLogLabel'), ...debugEntries.map((entry) => `[${entry.time}] ${entry.step}：${entry.msg}`)].join('\n');
+        const textarea = document.createElement('textarea');
+        textarea.className = 'bili-dl-diagnostics-text';
+        textarea.readOnly = true;
+        textarea.value = report;
+        textarea.setAttribute('aria-label', t('diagnosticsTextareaLabel'));
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'bili-dl-btn bili-dl-diagnostics-copy';
+        copy.textContent = t('copyDiagnostics');
+        copy.onclick = async () => {
+          try {
+            await copyTextToClipboard(report);
+            copy.textContent = t('copied');
+          } catch {
+            copy.textContent = t('copyFailedManual');
+          }
+        };
+        infoBody.append(textarea, copy);
+        return;
+      }
+    }
+    function showHome() {
+      lastInfoSheetKey = '';
+      pageEl?.classList.add('hidden');
+      homeEl?.classList.remove('hidden');
+      menu.classList.remove('is-page');
+    }
+    function openInfoSheet(key) {
+      if (!['settings', 'diagnostics', 'tasks'].includes(key)) return;
+      menu.classList.remove('is-entering');
+      renderInfoSheet(key);
+      homeEl?.classList.add('hidden');
+      pageEl?.classList.remove('hidden');
+      menu.classList.add('is-page');
+      pageEl.scrollTop = 0;
+    }
+    panel.querySelectorAll('[data-sheet]').forEach((btn) => btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openInfoSheet(btn.dataset.sheet);
+    }));
+    pageBack?.addEventListener('click', showHome);
+    function setQueueLabel(count) {
+      queueLabelEl.textContent = count > 1 ? t('queueAllPartsCount', { count }) : t('queueAllParts');
+    }
+
+    let qualityVideoKey = '';
+    let qualityBeforeAutoDefault = null;
+    let resetQualityOnNavigation = false;
+
+    function effectiveQualityStrategy() {
+      return qualityBeforeAutoDefault === null ? qualityStrategy : 'exact';
+    }
+
+    function syncQualityStrategy() {
+      qualityStrategyEls.forEach((el) => { el.value = effectiveQualityStrategy(); });
+    }
+
+    function saveDownloadPrefs() {
+      const qn = qualityBeforeAutoDefault ?? selectedQn;
+      return EXT.storage.local.set({ [DOWNLOAD_PREFS_KEY]: { format: selectedFormat, qn, qualityStrategy, spaceQualityTier, streamPreference, listDownloadKind } }).catch(() => {});
+    }
+
+    function applyFilenameSettings(settings) {
+      if (!settings) return;
+      filenameTemplate = settings.filenameTemplate || filenameTemplate;
+      if (Number.isInteger(settings.batchConcurrency) && settings.batchConcurrency >= 1 && settings.batchConcurrency <= 5) {
+        batchConcurrency = settings.batchConcurrency;
+      }
+      refreshFilenamePreview();
+    }
+
+    async function loadFilenameSettings() {
+      try {
+        if (globalThis.BiliDlSettings?.loadSettings) {
+          applyFilenameSettings(await globalThis.BiliDlSettings.loadSettings());
+        }
+      } catch { /* 设置读取失败不影响下载 */ }
+    }
+
+    function setFormat(fmt, persist = true) {
+      selectedFormat = fmt;
+      formatPillsEl.querySelectorAll('.bili-dl-pill[data-format]').forEach((b) => {
+        b.classList.toggle('active', b.dataset.format === fmt);
+      });
+      const isAudio = fmt === 'm4a';
+      if (qualitySection) qualitySection.classList.toggle('hidden', isAudio);
+      streamPreferenceEls.forEach((el) => el.closest('.bili-dl-stream-preference-row')?.classList.toggle('hidden', isAudio));
+      refreshStartBtnForParallel();
+      refreshEstimate();
+      refreshFilenamePreview();
+      if (persist) saveDownloadPrefs();
+    }
+
+    function syncQualitySelection() {
+      [pillsEl, listPillsEl].forEach((container) => {
+        container?.querySelectorAll('.bili-dl-pill[data-qn]').forEach((button) => {
+          button.classList.toggle('active', Number(button.dataset.qn) === selectedQn);
+        });
+      });
+    }
+
+    function selectQuality(qn) {
+      qualityBeforeAutoDefault = null;
+      selectedQn = Number(qn) || 0;
+      qualityStrategy = 'exact';
+      syncQualityStrategy();
+      syncQualitySelection();
+      refreshEstimate();
+      refreshFilenamePreview();
+      saveDownloadPrefs();
+    }
+
+    async function loadDownloadPrefs() {
+      try {
+        const data = await EXT.storage.local.get(DOWNLOAD_PREFS_KEY);
+        const prefs = data[DOWNLOAD_PREFS_KEY] || {};
+        if (['highest', '1080', '720'].includes(prefs.spaceQualityTier)) spaceQualityTier = prefs.spaceQualityTier;
+        if (prefs.format === 'mp4' || prefs.format === 'm4a') setFormat(prefs.format, false);
+        if (Number(prefs.qn) > 0) selectedQn = Number(prefs.qn);
+        if (prefs.qualityStrategy === 'highest' || prefs.qualityStrategy === 'exact') qualityStrategy = prefs.qualityStrategy;
+        if (prefs.streamPreference === 'compatible' || prefs.streamPreference === 'high-bitrate') streamPreference = prefs.streamPreference;
+        if (typeof prefs.listDownloadKind === 'string') setListDownloadKind(prefs.listDownloadKind, false);
+        syncQualityStrategy();
+        streamPreferenceEls.forEach((el) => { el.value = streamPreference; });
+        syncQualitySelection();
+        if (isSpacePage() || isSpaceCollectionPage()) renderSpaceQuality();
+        await loadFilenameSettings();
+        refreshFilenamePreview();
+      } catch { /* 偏好读取失败不影响下载 */ }
+    }
+
+    showStatus = (type, text, showDownloads = true) => {
+      statusEl.classList.remove('hidden', 'success', 'error');
+      statusEl.classList.add(type);
+      statusEl.textContent = text;
+      statusEl.setAttribute('role', type === 'error' ? 'alert' : 'status');
+      if (type === 'success' && showDownloads) {
+        const action = appendTextElement(statusEl, 'button', 'bili-dl-status-action', t('statusViewDownloads'));
+        action.type = 'button';
+        action.onclick = openBrowserDownloads;
+      }
+    };
+
+    function isListPage() {
+      return isSpacePage() || isSpaceCollectionPage() || /^\/list\//.test(location.pathname) || (collectionHref && new URL(collectionHref).pathname === location.pathname && Boolean(videoInfo?.collection?.items?.length));
+    }
+
+    let spaceGathering = false;
+
+    function renderSpaceQuality() {
+      if ((!isSpacePage() && !isSpaceCollectionPage()) || !listQualitySection || !listPillsEl) return;
+      listQualitySection.querySelector('.bili-dl-section-head').textContent = t('qualityStrategy');
+      listQualitySection.querySelector('.bili-dl-quality-strategy-row').classList.add('hidden');
+      clearNode(listPillsEl);
+      for (const [value, labelKey] of [['highest', 'spaceQualityTierHighest'], ['1080', 'spaceQualityTier1080'], ['720', 'spaceQualityTier720']]) {
+        const button = appendTextElement(listPillsEl, 'button', `bili-dl-pill${value === spaceQualityTier ? ' active' : ''}`, t(labelKey));
+        button.type = 'button';
+        button.setAttribute('aria-pressed', String(value === spaceQualityTier));
+        button.title = value === 'highest' ? t('spaceQualityHighestTitle') : t('spaceQualityCapTitle', { cap: value });
+        button.onclick = () => {
+          spaceQualityTier = value;
+          renderSpaceQuality();
+          saveDownloadPrefs();
+        };
+      }
+    }
+
+    function readSpaceDomMeta() {
+      const pickText = (...selectors) => {
+        for (const selector of selectors) {
+          const text = document.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim();
+          if (text) return text;
+        }
+        return '';
+      };
+      const readStat = (label) => {
+        for (const item of document.querySelectorAll('.nav-statistics .nav-item, .n-statistics .n-data, .counter-item, .h-statistics li, .upinfo__detail__stat')) {
+          const text = item.textContent.replace(/\s+/g, ' ').trim();
+          if (!text.includes(label)) continue;
+          const num = item.querySelector('.item-num, .num, .n-num, .counter, .upinfo__detail__stat-count')?.textContent?.replace(/\s+/g, ' ').trim();
+          if (num) return num;
+          return text.replace(new RegExp(`\\s*${label}.*$`), '').trim() || text;
+        }
+        const fallback = { 粉丝: '.h-fans', 关注: '.h-following', 获赞: '.h-liked' }[label];
+        if (!fallback) return '';
+        const text = document.querySelector(fallback)?.textContent?.replace(/\s+/g, ' ').trim() || '';
+        return text.replace(label, '').trim();
+      };
+      return {
+        name: pickText('.nickname', '.h-name', '.space-name', '.upinfo__name'),
+        fans: readStat('粉丝'),
+        following: readStat('关注'),
+        likes: readStat('获赞')
+      };
+    }
+
+    function readSpaceAvatarUrl() {
+      const scopes = [
+        '.upinfo__avatar img',
+        '.h-avatar img',
+        '.space-upinfo .avatar img',
+        '.header-upinfo .avatar img',
+        '.space-header .header-avatar-wrap img',
+        '.space-header .avatar img'
+      ];
+      for (const selector of scopes) {
+        const img = document.querySelector(selector);
+        if (img?.src) return normalizeCoverUrl(img.src);
+      }
+      const header = document.querySelector('.space-upinfo, .h-header, .space-header, .header-info');
+      const img = header?.querySelector('img');
+      return img?.src ? normalizeCoverUrl(img.src) : '';
+    }
+
+    let cachedSpaceDomPage = 1;
+
+    function readSpaceDomPageNumber() {
+      // The profile home has no upload pagination. Other modules on that page
+      // must not supply a page number or retain a previously visited page.
+      if (/^\/\d+\/?$/.test(location.pathname)) return (cachedSpaceDomPage = 1);
+      const active = document.querySelector(
+        '.vui_pagenation .vui_pager-item.is-active, .vui_pager .is-active, .be-pager-item-active, .pagination .current, button[aria-current="page"], .pagenation .current'
+      );
+      const n = Number(String(active?.textContent || active?.getAttribute('aria-label') || '').replace(/\D/g, ''));
+      if (Number.isFinite(n) && n > 0) {
+        cachedSpaceDomPage = n;
+        return n;
+      }
+      const params = new URL(location.href).searchParams;
+      const fromUrl = Number(params.get('pn') || params.get('page') || params.get('page_num'));
+      if (Number.isInteger(fromUrl) && fromUrl > 0) return (cachedSpaceDomPage = fromUrl);
+      return cachedSpaceDomPage;
+    }
+
+    function mutationTouchesExtension(mutations) {
+      const panelRoot = document.getElementById('bili-dl-panel-root');
+      if (!panelRoot) return false;
+      return mutations.every((mutation) => {
+        const node = mutation.target.nodeType === Node.TEXT_NODE ? mutation.target.parentElement : mutation.target;
+        return node instanceof Node && panelRoot.contains(node);
+      });
+    }
+
+    function findSpaceUploadsRoot() {
+      if (!isSpacePage()) return null;
+      const videoLinks = 'a[href*="/video/BV"], a[href*="/video/bv"]';
+      const headings = 'h1,h2,h3,[class*="title"],[class*="heading"]';
+      const inExtension = node => node.closest('#bili-dl-panel-root, .bili-dl-panel');
+      const text = node => node.textContent?.replace(/\s+/g, ' ').trim() || '';
+      // Home contains several video grids. Locate the actual “视频” module
+      // before looking at grids; the first .video-list may be a collection.
+      for (const heading of document.querySelectorAll(headings)) {
+        if (inExtension(heading) || !heading.getClientRects().length) continue;
+        if (!/^(?:TA\s*的\s*视频|我的视频|视频)(?:\s*[·•·\-]?\s*\d+)?$/.test(text(heading))) continue;
+        let scope = heading.parentElement;
+        while (scope && scope !== document.body && !inExtension(scope)) {
+          if (scope.querySelector(videoLinks)) {
+            const hasOtherModules = [...scope.querySelectorAll(headings)].some(node =>
+              /^(?:合集[:：·\s]|系列[:：·\s]|合集和系列|收藏|最近投币|最近点赞)/.test(text(node)));
+            if (!hasOtherModules && scope.getClientRects().length) return scope;
+            break;
+          }
+          scope = scope.parentElement;
+        }
+      }
+      // An upload-only route may use a dedicated grid without a heading.
+      // Never use this fallback on the mixed-content profile home.
+      if (!/^\/\d+\/upload\/video\/?$/.test(location.pathname)) return null;
+      const roots = [
+        document.querySelector('#video-list'),
+        document.querySelector('.video-list'),
+        document.querySelector('.list-content')
+      ].filter(Boolean);
+      return roots.find(root => root.getClientRects().length && !inExtension(root)
+        && !root.closest('[class*="season"], [class*="series"], [class*="collection"]')) || null;
+    }
+
+    function scrapeSpaceVisibleVideos() {
+      const root = findSpaceUploadsRoot();
+      if (!root) return [];
+      const author = readSpaceDomMeta().name || listItems[0]?.author || '';
+      const seen = new Set();
+      const items = [];
+      for (const link of root.querySelectorAll('a[href*="/video/BV"], a[href*="/video/bv"]')) {
+        if (!link.getClientRects().length) continue;
+        if (link.closest('.space-upinfo, .h-header, .space-header, nav, header, .bili-dl-panel, #bili-dl-panel-root')) continue;
+        const match = /\/video\/(BV[\w]+)/i.exec(link.href);
+        if (!match) continue;
+        // Only the BV prefix is case-insensitive; the identifier payload is not.
+        const bvid = 'BV' + match[1].slice(2);
+        if (seen.has(bvid)) continue;
+        seen.add(bvid);
+        const card = link.closest('.small-item, .bili-video-card, .upload-video-card, .video-list .item, .list-item');
+        const titleNode = card?.querySelector('.title, .bili-video-card__info--tit, .name, [title]');
+        const title = titleNode?.getAttribute('title')?.trim()
+          || titleNode?.textContent?.replace(/\s+/g, ' ').trim()
+          || link.getAttribute('title')?.trim()
+          || bvid;
+        items.push({
+          bvid,
+          aid: '',
+          cid: '',
+          title,
+          author,
+          cover: card?.querySelector('img')?.src || '',
+          views: '',
+          pubtime: 0,
+          duration: 0
+        });
+      }
+      return items;
+    }
+
+    function syncSpaceListTools() {
+      const onSpace = isSpacePage();
+      listRefreshPageBtn?.classList.toggle('hidden', !onSpace);
+      listFilterSepEl?.classList.toggle('hidden', !onSpace);
+    }
+
+    function renderSpaceProfile() {
+      const profile = panel.querySelector('#bili-dl-space-profile');
+      if (!profile) return;
+      if (!isSpacePage()) {
+        profile.classList.add('hidden');
+        clearNode(profile);
+        return;
+      }
+      const dom = readSpaceDomMeta();
+      const name = dom.name || listItems[0]?.author || t('upOwner');
+      const avatarUrl = readSpaceAvatarUrl();
+      clearNode(profile);
+      profile.classList.remove('hidden');
+      if (avatarUrl) {
+        const image = document.createElement('img');
+        image.src = avatarUrl;
+        image.alt = '';
+        image.onerror = () => image.remove();
+        profile.appendChild(image);
+      }
+      const copy = appendTextElement(profile, 'div', 'bili-dl-space-profile-copy', '');
+      appendTextElement(copy, 'strong', '', name);
+      const meta = appendTextElement(copy, 'div', 'bili-dl-space-profile-meta', '');
+      if (dom.fans) appendTextElement(meta, 'span', '', `${dom.fans} ${t('spaceFansSuffix')}`);
+      if (dom.following) appendTextElement(meta, 'span', '', `${dom.following} ${t('spaceFollowingSuffix')}`);
+      if (dom.likes) appendTextElement(meta, 'span', '', `${dom.likes} ${t('spaceLikesSuffix')}`);
+      appendTextElement(meta, 'span', '', listLoaded ? t('spacePostsCount', { count: listTotal }) : t('spaceReadingPosts'));
+      if (listRefreshPageBtn) {
+        listRefreshPageBtn.classList.remove('hidden');
+        listRefreshPageBtn.textContent = t('refreshCurrentPage');
+        listRefreshPageBtn.title = t('refreshCurrentPageTitle');
+        listRefreshPageBtn.disabled = listLoading || queueRunning || spaceGathering;
+        profile.appendChild(listRefreshPageBtn);
+      }
+    }
+
+    function setListStatus(text, type = '', options = {}) {
+      listStatusEl.textContent = text;
+      listStatusEl.title = text;
+      listStatusEl.dataset.type = type;
+      if (options.progress) listStatusEl.dataset.progress = '1';
+      else delete listStatusEl.dataset.progress;
+      const progressText = !queueCancelled && listStatusEl.dataset.progress === '1';
+      listResultEl?.classList.toggle('hidden', progressText || (!text && !lastListFailures.length));
+    }
+
+    function formatDuration(sec) {
+      const value = Math.floor(Math.max(0, Number(sec) || 0));
+      return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+    }
+
+    function listDownloadKindLabel(kind = listDownloadKind) {
+      return listContentParts(kind).map((part) => t({ video: 'listContentVideo', audio: 'listContentAudio', cover: 'listContentCover' }[part])).join(' + ') || t('listChooseContent');
+    }
+
+    function setListDownloadKind(kind, persist = true) {
+      const parts = listContentParts(kind);
+      listDownloadKind = parts.join('+');
+      listDownloadKindEl?.querySelectorAll('[data-list-content]').forEach((input) => {
+        input.checked = parts.includes(input.dataset.listContent);
+        input.disabled = queueRunning || spaceGathering;
+      });
+      if (listQualitySection) listQualitySection.classList.toggle('hidden', !parts.includes('video'));
+      updateListSelection();
+      updatePgcAccessRows();
+      schedulePgcAccessChecks();
+      if (persist) saveDownloadPrefs();
+    }
+
+    function updateListSelection() {
+      if (listRefreshPageBtn) listRefreshPageBtn.disabled = listLoading || queueRunning || spaceGathering;
+      const count = selectedListKeys.size;
+      listStartBtn.disabled = pendingListSync || listLoading || !count || !listContentParts(listDownloadKind).length || queueRunning || spaceGathering;
+      listDownloadKindEl?.querySelectorAll('[data-list-content]').forEach((input) => { input.disabled = queueRunning || spaceGathering; });
+      listStartBtn.textContent = !listContentParts(listDownloadKind).length ? t('listChooseContent') : count ? t('downloadSelectedCount', { count, kind: listDownloadKindLabel() }) : t('downloadSelectedKind', { kind: listDownloadKindLabel() });
+      const selectable = listItems.filter(canSelectListItem);
+      const allSelected = selectable.length > 0 && selectable.every((item) => selectedListKeys.has(listItemKey(item)));
+      listSelectAllBtn.textContent = allSelected ? t('deselectAll') : t('selectAll');
+      listSelectAllBtn.disabled = !selectable.length;
+      listSelectAllBtn.setAttribute('aria-pressed', String(allSelected));
+    }
+
+    function updateListLoadMore() {
+      if (listRefreshPageBtn) listRefreshPageBtn.disabled = listLoading || queueRunning || spaceGathering;
+      const visible = listHasMore || listLoading;
+      listLoadMoreBtn.classList.toggle('hidden', !visible);
+      listLoadMoreBtn.disabled = listLoading || spaceGathering || !listHasMore;
+      listLoadMoreBtn.textContent = listLoading
+        ? t('listLoadingMore')
+        : t('listLoadMoreBtn', {
+          action: isSpacePage() ? t('listLoadAllPosts') : t('listContinueLoad'),
+          count: listItems.length
+        });
+    }
+
+    function updateListRetryFailed() {
+      const count = lastListFailures.length;
+      listRetryFailedBtn.classList.toggle('hidden', !count);
+      listRetryFailedBtn.disabled = queueRunning;
+      listRetryFailedBtn.textContent = count ? t('retryIncompleteCount', { count }) : t('retryIncomplete');
+      listResultEl?.classList.toggle('hidden', !count && !listStatusEl.textContent);
+    }
+
+    const pgcAccessCache = new Map();
+    const pgcAccessPending = new Set();
+    let pgcAccessWorkers = 0;
+    let pgcAccessRevision = 0;
+    function pgcAccessKey(item) { return `${item.epId}:${item.aid}:${item.cid}`; }
+    function pgcAccess(item) {
+      const entry = pgcAccessCache.get(pgcAccessKey(item));
+      return entry && Date.now() - entry.at < 180000 ? entry : null;
+    }
+    function canSelectListItem(item) {
+      if (!item?.epId) return true;
+      const parts = listContentParts(listDownloadKind);
+      if (!parts.length) return false;
+      if (parts.every(part => part === 'cover')) return Boolean(item.cover || item.pic);
+      const access = pgcAccess(item);
+      return access?.state === 'checked'
+        && (!parts.includes('video') || access.video)
+        && (!parts.includes('audio') || access.audio);
+    }
+    function pgcAccessLabel(item) {
+      const parts = listContentParts(listDownloadKind);
+      if (parts.length && parts.every(part => part === 'cover')) return t('pgcCoverOnly');
+      const access = pgcAccess(item);
+      if (!access) return t('pgcChecking');
+      if (access.reason) return t({ preview: 'pgcPreview', region: 'pgcRegion', protected: 'pgcProtected', permission: 'pgcPermission', error: 'pgcCheckError' }[access.reason]);
+      return canSelectListItem(item) ? t('pgcAvailable') : t('pgcNoTrack');
+    }
+    function updatePgcAccessRows() {
+      const items = new Map(listItems.map(item => [listItemKey(item), item]));
+      const pgcItems = listItems.filter(item => item.epId);
+      if (pgcItems.length) {
+        const coverOnly = listContentParts(listDownloadKind).every(part => part === 'cover');
+        const checking = coverOnly ? 0 : pgcItems.filter(item => !pgcAccess(item)).length;
+        const available = pgcItems.filter(canSelectListItem).length;
+        listCountEl.textContent = t('pgcAccessSummary', {
+          total: listItems.length, available, checking,
+          unavailable: pgcItems.length - available - checking
+        });
+      }
+      listItemsEl.querySelectorAll('input[data-list-key]').forEach(input => {
+        const item = items.get(input.dataset.listKey);
+        if (!item?.epId) return;
+        const allowed = canSelectListItem(item);
+        const row = input.closest('label');
+        input.disabled = !allowed;
+        row.classList.toggle('is-unavailable', !allowed);
+        row.setAttribute('aria-disabled', String(!allowed));
+        row.querySelector('.bili-dl-pgc-access').textContent = pgcAccessLabel(item);
+        if (!allowed) { input.checked = false; selectedListKeys.delete(listItemKey(item)); }
+      });
+      updateListSelection();
+    }
+    function schedulePgcAccessChecks() {
+      if (!isOpen || activeMode !== 'list' || queueRunning || document.hidden) return;
+      if (!listContentParts(listDownloadKind).some(part => part !== 'cover')) return;
+      while (pgcAccessWorkers < 4) {
+        const item = listItems.find(item => item.epId && !pgcAccess(item) && !pgcAccessPending.has(pgcAccessKey(item)));
+        if (!item) break;
+        const key = pgcAccessKey(item);
+        const revision = pgcAccessRevision;
+        pgcAccessPending.add(key);
+        pgcAccessWorkers++;
+        void (async () => {
+          try {
+            const result = await agentCall('CHECK_PGC_ACCESS', { epId: item.epId, aid: item.aid, cid: item.cid });
+            if (revision === pgcAccessRevision) pgcAccessCache.set(key, { ...result, at: Date.now() });
+          } catch {
+            if (revision === pgcAccessRevision) pgcAccessCache.set(key, { state: 'error', reason: 'error', at: Date.now() });
+          } finally {
+            try {
+              if (revision === pgcAccessRevision) updatePgcAccessRows();
+            } catch (error) {
+              debugLog('列表', `检查状态更新失败：${error.message || error}`);
+            } finally {
+              // Keep the slot occupied during cooldown, including across refreshes.
+              setTimeout(() => {
+                pgcAccessPending.delete(key);
+                pgcAccessWorkers--;
+                schedulePgcAccessChecks();
+              }, 100);
+            }
+          }
+        })();
+      }
+    }
+
+    function listItemKey(item) {
+      return item?.listKey || item?.bvid || '';
+    }
+
+    function renderListItems() {
+      clearNode(listItemsEl);
+      const fragment = document.createDocumentFragment();
+      const keyword = listQuery.trim().toLocaleLowerCase();
+      const visibleItems = listItems
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => {
+          if (listFilter === 'selected' && !selectedListKeys.has(listItemKey(item))) return false;
+          return !keyword || item.title.toLocaleLowerCase().includes(keyword);
+        });
+      if (listSort !== 'default') {
+        visibleItems.sort((a, b) => listSort === 'newest'
+          ? (Number(b.item.pubtime) || 0) - (Number(a.item.pubtime) || 0)
+          : (Number(a.item.pubtime) || 0) - (Number(b.item.pubtime) || 0));
+      }
+      visibleItems.forEach(({ item, index }) => {
+        const label = document.createElement('label');
+        label.className = 'bili-dl-list-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.bvid = item.bvid;
+        checkbox.dataset.listKey = listItemKey(item);
+        checkbox.checked = selectedListKeys.has(listItemKey(item));
+        checkbox.addEventListener('change', () => {
+          if (!canSelectListItem(item)) { checkbox.checked = false; return; }
+          if (checkbox.checked) {
+            selectedListKeys.add(listItemKey(item));
+          } else selectedListKeys.delete(listItemKey(item));
+          updateListSelection();
+          if (listFilter === 'selected') renderListItems();
+        });
+        const ordinal = document.createElement('span');
+        ordinal.className = 'bili-dl-list-item-index';
+        ordinal.textContent = String(index + 1);
+        const meta = document.createElement('span');
+        meta.className = 'bili-dl-list-item-meta';
+        const title = document.createElement('strong');
+        title.textContent = item.title;
+        title.title = item.title;
+        const detail = document.createElement('small');
+        detail.textContent = [item.views, item.duration ? formatDuration(item.duration) : ''].filter(Boolean).join(' · ');
+        meta.append(title, detail);
+        if (item.epId) {
+          const access = document.createElement('small');
+          access.className = 'bili-dl-pgc-access';
+          access.setAttribute('aria-live', 'polite');
+          meta.appendChild(access);
+        }
+        label.append(checkbox, ordinal, meta);
+        fragment.appendChild(label);
+      });
+      listItemsEl.appendChild(fragment);
+      if (!visibleItems.length) {
+        const empty = document.createElement('p');
+        empty.className = 'bili-dl-list-empty';
+        empty.textContent = listFilter === 'selected' ? t('emptyFilterSelected') : t('emptyFilterSearch');
+        listItemsEl.appendChild(empty);
+      }
+      updatePgcAccessRows();
+      schedulePgcAccessChecks();
+    }
+
+    function mergeListItems(items) {
+      const existing = new Set(listItems.map(listItemKey));
+      const fresh = (Array.isArray(items) ? items : []).filter((item) => item?.bvid && !existing.has(listItemKey(item)));
+      listItems.push(...fresh);
+      return fresh.length;
+    }
+
+    function mergeSpacePageItems(apiItems, scrapedItems) {
+      if (!scrapedItems.length) return apiItems;
+      const apiByBvid = new Map((apiItems || []).filter((item) => item?.bvid).map((item) => [String(item.bvid).replace(/^bv/i, 'BV'), item]));
+      return scrapedItems.map((item) => {
+        const api = apiByBvid.get(String(item.bvid).replace(/^bv/i, 'BV'));
+        return api ? { ...api, title: item.title || api.title, cover: item.cover || api.cover } : item;
+      });
+    }
+
+    async function ensureListItemVideoIds(item) {
+      if (item?.aid && item?.cid) return item;
+      const resolved = await agentCall('RESOLVE_VIDEO', { href: item.epId ? `https://www.bilibili.com/bangumi/play/ep${item.epId}` : `https://www.bilibili.com/video/${item.bvid}`, pageIndex: Number(item.pageIndex) || 0 });
+      item.aid = String(resolved.info.aid || item.aid || '');
+      item.cid = String(resolved.info.cid || item.cid || '');
+      item.cover = item.cover || resolved.info.pic || '';
+      if (!item.aid || !item.cid) throw new Error('无法读取该投稿的视频信息');
+      return item;
+    }
+
+    async function applySpaceListData(data, { pn, pageOnly = false, statusPrefix = '' } = {}) {
+      listItems = Array.isArray(data.items) ? data.items : [];
+      listTotal = Number(data.total) || 0;
+      selectedListKeys = new Set(listItems.filter((item) => selectedListKeys.has(listItemKey(item))).map(listItemKey));
+      listCursor = pageOnly ? null : (data.cursor || null);
+      listHasMore = pageOnly ? true : !!data.hasMore;
+      const author = readSpaceDomMeta().name || listItems[0]?.author || t('upOwner');
+      listTitleEl.textContent = pageOnly ? t('listPageTitle', { author, page: pn }) : (data.title || t('listAllPostsTitle', { author }));
+      listTitleEl.title = listTitleEl.textContent;
+      listCountEl.textContent = pageOnly
+        ? t('listCurrentPageCount', { loaded: listItems.length, total: listTotal ? t('listLoadedTotal', { total: listTotal }) : '' })
+        : formatListLoadedCount(listItems.length, listTotal);
+      listLoaded = true;
+      renderListItems();
+      renderSpaceProfile();
+      const prefix = statusPrefix || (pageOnly ? t('listSyncPagePrefix', { page: pn, count: listItems.length }) : '');
+      setListStatus(prefix || (listItems.length ? t('listSelectHint') : t('listEmptyRetry')));
+    }
+
+    function spaceViewKey() {
+      if (!isSpacePage()) return location.href;
+      return location.href + '|' + readSpaceDomPageNumber() + '|' + scrapeSpaceVisibleVideos().map(item => item.bvid).join(',');
+    }
+
+    function captureListView() {
+      return { href: location.href, revision: listViewRevision, key: spaceViewKey() };
+    }
+
+    function isCurrentListView(request) {
+      const current = request.href === location.href && request.revision === listViewRevision && request.key === spaceViewKey();
+      if (!current) pendingListSync = true;
+      return current;
+    }
+
+    function scheduleListSync() {
+      clearTimeout(listSyncTimer);
+      listSyncTimer = setTimeout(flushPendingListSync, 100);
+    }
+
+    function flushPendingListSync() {
+      if (!pendingListSync || !isOpen || document.hidden || listLoading || queueRunning || downloading || spaceGathering) return;
+      if (isSpaceCollectionsIndex()) {
+        pendingListSync = false;
+        void loadVideoInfo();
+      } else if (activeMode === 'list' && isListPage()) {
+        if (isSpacePage()) void refreshSpaceCurrentPage(true);
+        else void loadListItems(true);
+      }
+    }
+
+    function observeSpaceView() {
+      if (!isSpacePage()) { lastSpaceViewKey = ''; return; }
+      const key = spaceViewKey();
+      if (!lastSpaceViewKey) { lastSpaceViewKey = key; return; }
+      if (key === lastSpaceViewKey) return;
+      lastSpaceViewKey = key;
+      listViewRevision++;
+      pendingListSync = true;
+      listLoaded = false;
+      selectedListKeys = new Set();
+      updateListSelection();
+      scheduleListSync();
+    }
+
+    async function refreshSpaceCurrentPage(fromWatcher = false) {
+      if (!isSpacePage()) return;
+      if (listLoading || queueRunning || downloading || spaceGathering) { pendingListSync = true; return; }
+      const request = captureListView();
+      pendingListSync = false;
+      const requestedHref = location.href;
+      const pn = readSpaceDomPageNumber();
+      listLoading = true;
+      listRefreshPageBtn.disabled = true;
+      updateListLoadMore();
+      setListStatus(fromWatcher ? t('listSwitchPage', { page: pn }) : t('listReadingPage', { page: pn }));
+      try {
+        const scraped = scrapeSpaceVisibleVideos();
+        const data = await agentCall('RESOLVE_LIST', { cursor: { pn } });
+        if (!isCurrentListView(request)) return;
+        const items = mergeSpacePageItems(data.items, scraped);
+        await applySpaceListData({ ...data, items }, {
+          pn,
+          pageOnly: true,
+          statusPrefix: t('spaceSyncDownloadHint', { page: pn, count: items.length })
+        });
+      } catch (error) {
+        if (!isCurrentListView(request)) return;
+        const scraped = scrapeSpaceVisibleVideos();
+        if (scraped.length) {
+          await applySpaceListData({ items: scraped, total: listTotal, space: true }, {
+            pn,
+            pageOnly: true,
+            statusPrefix: t('spaceReadFromPage', { count: scraped.length })
+          });
+        } else {
+          setListStatus(t('listReadFailed', { error: translateUserError(error.message || error) }), 'error');
+        }
+      } finally {
+        listLoading = false;
+        listRefreshPageBtn.disabled = false;
+        updateListLoadMore();
+        updateListSelection();
+        scheduleListSync();
+      }
+    }
+
+    async function loadListItems(force = false) {
+      if (force && !listLoading) {
+        pgcAccessRevision++;
+        pgcAccessCache.clear();
+      }
+      if (isSpaceCollectionsIndex()) return;
+      if (listLoading) { if (force) pendingListSync = true; return; }
+      // Explicit gather-all opens this list while spaceGathering is true.
+      // Background synchronization still waits for that operation to finish.
+      if (queueRunning || downloading) { if (force || !listLoaded) pendingListSync = true; return; }
+      if (listLoaded && !force) return;
+      const request = captureListView();
+      pendingListSync = false;
+      const requestedHref = location.href;
+      listLoading = true;
+      updateListLoadMore();
+      setListStatus(force ? t('listRefreshing') : t('listReading'));
+      try {
+        const spacePn = isSpacePage() ? readSpaceDomPageNumber() : 0;
+        const scraped = isSpacePage() ? scrapeSpaceVisibleVideos() : [];
+        const data = await agentCall('RESOLVE_LIST', spacePn ? { cursor: { pn: spacePn } } : {}, isListPage() && !isSpacePage() ? 180000 : 20000);
+        if (!isCurrentListView(request)) return;
+        if (data.space) {
+          const items = mergeSpacePageItems(data.items, scraped);
+          await applySpaceListData({ ...data, items }, {
+            pn: spacePn,
+            pageOnly: true,
+            statusPrefix: items.length ? t('spacePageLoadedHint', { page: spacePn, count: items.length }) : ''
+          });
+        } else {
+          listItems = Array.isArray(data.items) ? data.items : [];
+          listTotal = Number(data.total) || 0;
+          selectedListKeys = new Set(listItems.filter((item) => selectedListKeys.has(listItemKey(item))).map(listItemKey));
+          listCursor = data.cursor || null;
+          listHasMore = !!data.hasMore;
+          listTitleEl.textContent = data.title || t('videoList');
+          listTitleEl.title = data.title || t('videoList');
+          listCountEl.textContent = formatListLoadedCount(listItems.length, data.total);
+          listLoaded = true;
+          renderListItems();
+          setListStatus(listItems.length ? (data.collection ? t('listCollectionHint') : t('listScrollHint')) : t('listEmptyRetry'));
+        }
+        debugLog('列表', `已读取 ${listItems.length} 个视频`);
+      } catch (error) {
+        if (!isCurrentListView(request)) return;
+        setListStatus(t('listLoadFailed', { error: translateUserError(error.message || error) }), 'error');
+        debugLog('列表', `读取失败：${error.message || error}`);
+      } finally {
+        listLoading = false;
+        updateListLoadMore();
+        updateListSelection();
+        scheduleListSync();
+      }
+    }
+
+    async function loadMoreListItems() {
+      if (listLoading || !listHasMore) return;
+      if (pendingListSync) { scheduleListSync(); return false; }
+      const request = captureListView();
+      const requestedHref = location.href;
+      listLoading = true;
+      updateListLoadMore();
+      setListStatus(t('listLoadMoreProgress', { count: listItems.length }));
+      try {
+        const data = await agentCall('LOAD_LIST_PAGE', { cursor: listCursor });
+        if (!isCurrentListView(request)) return false;
+        const added = mergeListItems(data.items);
+        listTotal = Number(data.total) || listTotal;
+        if (data.hasMore && !added) throw new Error('分页未返回新视频，请稍后重试');
+        listCursor = data.cursor || listCursor;
+        listHasMore = !!data.hasMore && added > 0;
+        listCountEl.textContent = formatListLoadedCount(listItems.length, data.total);
+        renderListItems();
+        setListStatus(added ? t('listLoadMoreAdded', { count: added }) : t('listLoadMoreNone'));
+        debugLog('列表', `分页加载 ${added} 个，累计 ${listItems.length} 个`);
+        return true;
+      } catch (error) {
+        if (!isCurrentListView(request)) return false;
+        setListStatus(t('listLoadMoreFailed', { error: translateUserError(error.message || error) }), 'error');
+        debugLog('列表', `分页加载失败：${error.message || error}`);
+        return false;
+      } finally {
+        listLoading = false;
+        updateListLoadMore();
+        updateListSelection();
+        scheduleListSync();
+      }
+    }
+
+    async function setDownloadMode(mode, refreshList = true) {
+      if (isSpaceCollectionsIndex()) {
+        activeMode = 'video';
+        videoBodyEl.classList.add('hidden');
+        listBodyEl.classList.add('hidden');
+        return;
+      }
+      if (isSpacePage() || isSpaceCollectionPage()) mode = 'list';
+      activeMode = mode;
+      videoBodyEl.classList.toggle('hidden', mode === 'list');
+      listBodyEl.classList.toggle('hidden', mode !== 'list');
+      menu.classList.toggle('is-list-mode', mode === 'list');
+      if (mode === 'list') {
+        estimateRequestId += 1;
+        syncQualitySelection();
+        if (isSpacePage() || isSpaceCollectionPage()) renderSpaceQuality();
+      } else {
+        syncQualitySelection();
+        refreshEstimate();
+      }
+      modeTabsEl.querySelectorAll('[data-mode]').forEach((button) => {
+        const active = button.dataset.mode === mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      homeEl.scrollTop = 0;
+      if (mode === 'list') {
+        await loadListItems(refreshList && !queueRunning);
+        updatePgcAccessRows();
+        schedulePgcAccessChecks();
+      }
+    }
+
+    function showDownloadError(text) {
+      showStatus('error', text);
+    }
+
+    function showRetryableDownloadError(job, error) {
+      const problem = classifyDownloadError(error);
+      job.error = problem;
+      setTaskState(job, problem.type === 'cancelled' ? TASK_STATE.cancelled : TASK_STATE.failed, problem.message);
+      statusEl.classList.remove('hidden', 'success', 'error');
+      statusEl.classList.add('error');
+      clearNode(statusEl);
+      statusEl.append(document.createTextNode(`${t('errDownloadFailedPrefix')}${translateUserError(problem.message)} `));
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'bili-dl-status-action';
+      retry.textContent = t('retryThisTask');
+      retry.onclick = (event) => launchVideoTask(job, event);
+      statusEl.appendChild(retry);
+    }
+
+    function formatBytes(n) {
+      const v = Number(n) || 0;
+      if (v >= 1024 * 1024 * 1024) return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+      if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+      if (v >= 1024) return Math.round(v / 1024) + ' KB';
+      if (v > 0) return v + ' B';
+      return '0 B';
+    }
+
+    async function refreshEstimate() {
+      const requestId = ++estimateRequestId;
+      currentEstimateBytes = 0;
+      if (activeMode === 'list') {
+        estimateEl.classList.add('hidden');
+        return;
+      }
+      if (!videoInfo?.aid || !videoInfo?.cid) {
+        estimateEl.classList.add('hidden');
+        return;
+      }
+      if (selectedFormat === 'm4a') {
+        try {
+          // 先同步展示占位行，再用实际结果替换文字；高度不会在请求完成时突变。
+          estimateText.textContent = t('estimateCalculating');
+          estimateEl.classList.remove('hidden');
+          const est = await agentCall('GET_ESTIMATE', {
+            aid: videoInfo.aid,
+            cid: videoInfo.cid,
+            epId: videoInfo.epId,
+            duration: videoInfo.duration,
+            audioOnly: true
+          });
+          if (requestId !== estimateRequestId || activeMode === 'list') return;
+          currentEstimateBytes = Number(est.sizeBytes) || 0;
+          estimateText.textContent = t('estimateSizeLabel', {
+            size: est.sizeLabel && est.sizeLabel !== '未知' ? est.sizeLabel : t('estimateSizeUnknown'),
+            ref: t('estimateForReference'),
+            note: est.estimateNote === '单文件含音视频' ? ` · ${t('estimateSingleFile')}` : ''
+          });
+          estimateEl.classList.remove('hidden');
+        } catch {
+          if (requestId !== estimateRequestId || activeMode === 'list') return;
+          estimateEl.classList.add('hidden');
+        }
+        return;
+      }
+      if (!selectedQn) {
+        estimateEl.classList.add('hidden');
+        return;
+      }
+      try {
+        // 同上：保持预估行占位，切换到单视频页不会因异步结果二次改变高度。
+        estimateText.textContent = t('estimateCalculating');
+        estimateEl.classList.remove('hidden');
+        const est = await agentCall('GET_ESTIMATE', {
+          aid: videoInfo.aid,
+          cid: videoInfo.cid,
+          epId: videoInfo.epId,
+          qn: selectedQn,
+          duration: videoInfo.duration,
+          streamPreference
+        });
+        if (requestId !== estimateRequestId || activeMode === 'list') return;
+        currentEstimateBytes = Number(est.sizeBytes) || 0;
+        estimateText.textContent = t('estimateSizeLabel', {
+          size: est.sizeLabel && est.sizeLabel !== '未知' ? est.sizeLabel : t('estimateSizeUnknown'),
+          ref: t('estimateForReference'),
+          note: est.estimateNote === '单文件含音视频' ? ` · ${t('estimateSingleFile')}` : ''
+        });
+        estimateEl.classList.remove('hidden');
+      } catch {
+        if (requestId !== estimateRequestId || activeMode === 'list') return;
+        estimateEl.classList.add('hidden');
+      }
+    }
+
+    /** 并行任务：每个 job 一张独立进度卡，可单独暂停/取消 */
+    const PARALLEL_MAX = 3;
+    const activeJobs = new Map();
+    acceptsMergeRequest = (jobId) => {
+      const job = activeJobs.get(jobId);
+      return Boolean(job && !job.cancelRequested && job.state === TASK_STATE.merging);
+    };
+    let jobSeq = 0;
+    const TASK_STATE = Object.freeze({
+      queued: 'queued',
+      preparing: 'preparing',
+      downloading: 'downloading',
+      paused: 'paused',
+      merging: 'merging',
+      saving: 'saving',
+      completed: 'completed',
+      failed: 'failed',
+      cancelled: 'cancelled'
+    });
+    const taskUi = {
+      video: { jobList: jobListEl, jobPanel: videoJobPanelEl, queuePause: queuePauseBtn, queueCancel: queueCancelBtn, queueActions: queueActionsEl, body: videoBodyEl },
+      list: { jobList: listJobListEl, jobPanel: listJobPanelEl, queuePause: listQueuePauseBtn, queueCancel: listQueueCancelBtn, queueActions: listQueueActionsEl, body: listBodyEl }
+    };
+
+    const powerClient = globalThis.BiliDlPower.createClient({
+      runtime: EXT.runtime,
+      needed: () => globalThis.BiliDlPower.needsPower(activeJobs.values(),
+        queueRunning && Boolean(operationMode) && !queuePaused && !queueCancelled),
+      log: debugLog
+    });
+    window.addEventListener('pagehide', () => powerClient.stop());
+    window.addEventListener('pageshow', () => powerClient.resume());
+
+    function getTaskUi(scope) {
+      return taskUi[scope] || taskUi.video;
+    }
+
+    function jobScope(job) {
+      return job?.scope === 'list' ? 'list' : 'video';
+    }
+
+    function createDownloadTask(seed = {}) {
+      return {
+        ...seed,
+        jobId: seed.jobId || `job-${Date.now()}-${++jobSeq}`,
+        scope: seed.scope === 'list' ? 'list' : 'video',
+        state: TASK_STATE.queued,
+        attempts: Number(seed.attempts) || 0,
+        error: null,
+        createdAt: seed.createdAt || Date.now(),
+        phaseTimes: {},
+        updatedAt: Date.now()
+      };
+    }
+
+    function setTaskState(job, state, detail = '') {
+      if (!job) return;
+      job.state = state;
+      job.updatedAt = Date.now();
+      job.phaseTimes ||= {};
+      job.phaseTimes[state] ||= job.updatedAt;
+      if (detail) job.detail = detail;
+      if (job.cardEl) job.cardEl.dataset.state = state;
+      powerClient.update();
+    }
+
+    function classifyDownloadError(error) {
+      const message = String(error?.message || error || '下载失败');
+      if (/下载已取消|已取消|取消/.test(message)) return { type: 'cancelled', message: '下载已取消' };
+      if (/^保存阶段失败/.test(message)) return { type: 'save', message };
+      if (/Could not establish connection|Receiving end does not exist|message port closed|Extension context invalidated|扩展连接检查失败|扩展已更新/i.test(message)) {
+        return { type: 'extension', message: '扩展已更新，请刷新当前 B 站页面后重试' };
+      }
+      if (/登录|权限|会员|大会员/.test(message)) return { type: 'permission', message };
+      if (/清晰度|可下载/.test(message)) return { type: 'quality', message };
+      if (/合成|合并|mux|remux/i.test(message)) return { type: 'merge', message };
+      if (/保存|download/i.test(message)) return { type: 'save', message };
+      return { type: 'network', message };
+    }
+
+    function taskStateForStep(step) {
+      if (step === 'prepare' || step === 'queue') return TASK_STATE.preparing;
+      if (step === 'paused') return TASK_STATE.paused;
+      if (step === 'merge') return TASK_STATE.merging;
+      if (step === 'save') return TASK_STATE.saving;
+      return TASK_STATE.downloading;
+    }
+
+    function syncJobListVisibility() {
+      powerClient.update();
+      downloading = activeJobs.size > 0 || queueRunning;
+      const listQueueLayout = queueRunning && operationMode === 'list' && !queueCancelled;
+      listBodyEl?.classList.toggle('is-queue-running', listQueueLayout);
+      Object.entries(taskUi).forEach(([scope, ui]) => {
+        const hasJobs = Array.from(activeJobs.values()).some((job) => jobScope(job) === scope);
+        const showQueueControls = queueRunning && !queueCancelled && operationMode === scope;
+        ui.jobList.classList.toggle('hidden', !hasJobs);
+        ui.queueActions.classList.toggle('hidden', !showQueueControls);
+        ui.jobPanel?.classList.toggle('hidden', !(hasJobs || showQueueControls));
+        ui.queuePause.textContent = queuePaused ? '继续全部' : '暂停全部';
+      });
+    }
+
+    function waitWhileQueuePaused() {
+      if (!queuePaused || queueCancelled) return Promise.resolve();
+      if (!queuePauseWaiter) {
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        queuePauseWaiter = { resolve, promise };
+      }
+      return queuePauseWaiter.promise;
+    }
+
+    function resumeEntireQueue() {
+      queuePaused = false;
+      agentSignal('RESUME_DOWNLOAD');
+      if (queuePauseWaiter) {
+        queuePauseWaiter.resolve();
+        queuePauseWaiter = null;
+      }
+      syncJobListVisibility();
+    }
+
+    function pauseEntireQueue() {
+      queuePaused = true;
+      agentSignal('PAUSE_DOWNLOAD');
+      if ([...activeJobs.values()].some((job) => job.merging || job.state === TASK_STATE.saving)) {
+        const message = '已暂停后续任务；当前合成或保存完成后，不再启动下一项。';
+        if (operationMode === 'list') setListStatus(message);
+        else showStatus('info', message);
+      }
+      syncJobListVisibility();
+    }
+
+    function toggleEntireQueuePause() {
+      if (!queueRunning || queueCancelled) return;
+      if (queuePaused) resumeEntireQueue();
+      else pauseEntireQueue();
+    }
+
+    function cancelEntireQueue() {
+      if (!queueRunning) return;
+      queueCancelled = true;
+      queuePaused = false;
+      if (queuePauseWaiter) {
+        queuePauseWaiter.resolve();
+        queuePauseWaiter = null;
+      }
+      activeJobs.forEach((job) => {
+        job.cancelRequested = true;
+        agentSignal('CANCEL_DOWNLOAD', { jobId: job.jobId });
+      });
+      Object.values(taskUi).forEach(({ queuePause, queueCancel }) => {
+        queuePause.disabled = true;
+        queueCancel.disabled = true;
+        queueCancel.textContent = t('queueCancelling');
+      });
+      if (operationMode === 'list') setListStatus(t('queueCancellingStatus'));
+      syncJobListVisibility();
+    }
+
+    function resetQueueCancelButton() {
+      queuePaused = false;
+      if (queuePauseWaiter) {
+        queuePauseWaiter.resolve();
+        queuePauseWaiter = null;
+      }
+      Object.values(taskUi).forEach(({ queuePause, queueCancel }) => {
+        queuePause.disabled = false;
+        queuePause.textContent = t('pauseAll');
+        queueCancel.disabled = false;
+        queueCancel.textContent = t('cancelQueue');
+      });
+      syncJobListVisibility();
+    }
+
+    function hideProgress() {
+      activeJobs.forEach((j) => j.cardEl?.remove());
+      activeJobs.clear();
+      Object.values(taskUi).forEach(({ jobList }) => clearNode(jobList));
+      syncJobListVisibility();
+    }
+
+    function mountJobCard(job) {
+      const el = document.createElement('div');
+      el.className = 'bili-dl-progress bili-dl-job-card';
+      el.dataset.jobId = job.jobId;
+      el.appendChild(createFragment(`
+        <div class="bili-dl-progress-meta">
+          <span class="bili-dl-progress-title"></span>
+          <span class="bili-dl-progress-q"></span>
+        </div>
+        <div class="bili-dl-progress-sub hidden"></div>
+        <div class="bili-dl-progress-head">
+          <span class="bili-dl-job-phase"></span>
+          <span class="bili-dl-job-pct">0%</span>
+          <button type="button" class="bili-dl-job-cancel-inline"></button>
+        </div>
+        <div class="bili-dl-progress-track">
+          <div class="bili-dl-progress-bar"></div>
+        </div>
+        <div class="bili-dl-progress-actions hidden">
+          <button type="button" class="bili-dl-action-btn bili-dl-job-pause"></button>
+          <button type="button" class="bili-dl-action-btn danger bili-dl-job-cancel"></button>
+        </div>
+      `));
+      const titleEl = el.querySelector('.bili-dl-progress-title');
+      titleEl.textContent = job.info?.title || t('videoFallback');
+      titleEl.title = job.info?.title || '';
+      el.querySelector('.bili-dl-progress-q').textContent =
+        job.format === 'm4a' ? t('m4aAudioLabel') : (job.label || '');
+      if (job.scope === 'list' && job.queueTotal) {
+        const sub = el.querySelector('.bili-dl-progress-sub');
+        sub.textContent = t('listDownloading', { index: job.queueIndex, total: job.queueTotal, title: job.info?.title || t('videoFallback') });
+        sub.title = sub.textContent;
+        sub.classList.remove('hidden');
+      }
+      el.querySelector('.bili-dl-job-phase').textContent = stepLabel('prepare');
+      el.querySelector('.bili-dl-job-cancel-inline').textContent = t('jobCancel');
+      el.querySelector('.bili-dl-job-pause').textContent = t('jobPause');
+      el.querySelector('.bili-dl-job-cancel').textContent = t('jobCancel');
+
+      const pauseBtn = el.querySelector('.bili-dl-job-pause');
+      const cancelBtn = el.querySelector('.bili-dl-job-cancel');
+      const cancelInline = el.querySelector('.bili-dl-job-cancel-inline');
+      const bar = el.querySelector('.bili-dl-progress-bar');
+
+      pauseBtn.onclick = () => {
+        if (queuePaused) { resumeEntireQueue(); return; }
+        const j = activeJobs.get(job.jobId);
+        if (!j || j.merging) return;
+        if (j.paused) {
+          agentSignal('RESUME_DOWNLOAD', { jobId: job.jobId });
+          j.paused = false;
+          setTaskState(j, TASK_STATE.downloading);
+          pauseBtn.textContent = t('jobPause');
+          bar.classList.remove('paused');
+        } else {
+          agentSignal('PAUSE_DOWNLOAD', { jobId: job.jobId });
+        }
+      };
+
+      const cancelJob = () => {
+        job.cancelRequested = true;
+        agentSignal('CANCEL_DOWNLOAD', { jobId: job.jobId });
+      };
+      cancelBtn.onclick = cancelJob;
+      cancelInline.onclick = cancelJob;
+
+      job.cardEl = el;
+      job.paused = false;
+      job.merging = false;
+      const ui = getTaskUi(jobScope(job));
+      ui.jobList.appendChild(el);
+      syncJobListVisibility();
+      // 新任务出现时把进度和操作按钮带入当前标签的可视区域。
+      requestAnimationFrame(() => {
+        if (jobScope(job) === 'list') {
+          ui.jobList.scrollTop = ui.jobList.scrollHeight;
+          if (listBodyEl.scrollHeight > listBodyEl.clientHeight) {
+            listBodyEl.scrollTo({ top: listBodyEl.scrollHeight, behavior: 'smooth' });
+          }
+        } else if (videoBodyEl.scrollHeight > videoBodyEl.clientHeight) {
+          videoBodyEl.scrollTo({ top: videoBodyEl.scrollHeight, behavior: 'smooth' });
+        }
+      });
+      return el;
+    }
+
+    function removeJobCard(jobId) {
+      const j = activeJobs.get(jobId);
+      recordTask(j);
+      j?.cardEl?.remove();
+      activeJobs.delete(jobId);
+      syncJobListVisibility();
+    }
+
+    function setJobActionsVisible(el, visible) {
+      const actions = el.querySelector('.bili-dl-progress-actions');
+      const inline = el.querySelector('.bili-dl-job-cancel-inline');
+      const isList = el.closest('#bili-dl-list-job-list');
+      if (isList) {
+        actions?.classList.add('hidden');
+        inline?.classList.toggle('hidden', !visible);
+        return;
+      }
+      actions?.classList.toggle('hidden', !visible);
+      inline?.classList.add('hidden');
+    }
+
+    updateProgress = (step, percent, received, total, jobId, meta = {}) => {
+      const job = jobId ? activeJobs.get(jobId) : null;
+      const el = job?.cardEl;
+      if (!el || job.cancelRequested || queueCancelled) return;
+      setTaskState(job, taskStateForStep(step));
+
+      const phaseEl = el.querySelector('.bili-dl-job-phase');
+      const pctEl = el.querySelector('.bili-dl-job-pct');
+      const bar = el.querySelector('.bili-dl-progress-bar');
+      const pauseBtn = el.querySelector('.bili-dl-job-pause');
+      const cancelBtn = el.querySelector('.bili-dl-job-cancel');
+
+      if (step === 'merge' || step === 'save') {
+        job.merging = step === 'merge';
+        // 流式合成可中断：保留取消入口，避免大文件合成时用户只能等待或刷新页面。
+        setJobActionsVisible(el, true);
+        pauseBtn.disabled = step === 'merge' || step === 'save';
+        cancelBtn.disabled = false;
+      } else if (step !== 'paused') {
+        job.merging = false;
+        setJobActionsVisible(el, true);
+        pauseBtn.disabled = false;
+        cancelBtn.disabled = false;
+      }
+
+      if (step === 'paused') {
+        job.paused = true;
+        pauseBtn.textContent = t('jobResume');
+        phaseEl.textContent = stepLabel('paused');
+        bar.classList.add('paused');
+        return;
+      }
+
+      if (job.paused && step !== 'paused') {
+        job.paused = false;
+        pauseBtn.textContent = t('jobPause');
+        bar.classList.remove('paused');
+      }
+
+      const pct = Number(percent);
+      const recv = Number(received) || 0;
+      const tot = Number(total) || 0;
+
+      if (step === 'merge') {
+        const sizeHint = tot || recv;
+        if (meta.queued) {
+          phaseEl.textContent = t('waitMergeQueue');
+        } else if (sizeHint) {
+          const etaMs = Number(meta.etaMs) || 0;
+          const etaText = etaMs > 0
+            ? ` · 约剩余 ${etaMs >= 60000 ? Math.ceil(etaMs / 60000) + ' 分钟' : Math.ceil(etaMs / 1000) + ' 秒'}`
+            : '';
+          phaseEl.textContent = recv > 0
+            ? `正在合成 ${formatBytes(recv)} / ${formatBytes(sizeHint)}${etaText}`
+            : '正在合成，约 ' + formatBytes(sizeHint);
+        } else {
+          phaseEl.textContent = stepLabel('merge');
+        }
+        bar.classList.add('indeterminate');
+        pctEl.classList.add('hidden');
+        return;
+      }
+
+      if (step === 'queue') {
+        phaseEl.textContent = stepLabel('queue');
+        const qp = Math.min(100, Math.max(0, pct || 0));
+        pctEl.textContent = qp + '%';
+        bar.style.width = qp + '%';
+        bar.classList.remove('indeterminate', 'paused');
+        pctEl.classList.remove('hidden');
+        return;
+      }
+
+      phaseEl.textContent = stepLabel(step);
+
+      if (tot > 0) {
+        const displayPct = Math.min(100, Math.max(0, pct >= 0 ? pct : Math.round((recv / tot) * 100)));
+        pctEl.textContent = formatBytes(recv) + ' / ' + formatBytes(tot);
+        bar.style.width = displayPct + '%';
+        bar.classList.remove('indeterminate');
+        pctEl.classList.remove('hidden');
+        return;
+      }
+
+      if (recv > 0) {
+        pctEl.textContent = formatBytes(recv);
+        bar.classList.add('indeterminate');
+        pctEl.classList.remove('hidden');
+        return;
+      }
+
+      if (pct > 0) {
+        pctEl.textContent = Math.min(100, pct) + '%';
+        bar.style.width = Math.min(100, pct) + '%';
+        bar.classList.remove('indeterminate');
+        pctEl.classList.remove('hidden');
+      } else {
+        bar.classList.add('indeterminate');
+        pctEl.classList.add('hidden');
+      }
+    };
+
+    function setDetect(_text, _ready) {
+      // 识别条已移除，保留空函数以免改动过多调用点
+    }
+
+    function setVideoLoading(loading) {
+      videoCard.classList.toggle('is-loading', loading);
+      if (loading) {
+        coverSk.classList.remove('hidden');
+        coverImg.classList.add('hidden');
+        coverPh.classList.add('hidden');
+      }
+      videoSk.classList.toggle('hidden', !loading);
+      videoContent.classList.toggle('hidden', loading);
+    }
+
+    function updateDefaultQuality(list, videoKey) {
+      if (list.length && videoKey && videoKey !== qualityVideoKey) {
+        selectedQn = resetQualityOnNavigation ? 0 : (qualityBeforeAutoDefault ?? selectedQn);
+        qualityBeforeAutoDefault = null;
+        qualityVideoKey = videoKey;
+        if (list.some((q) => q.qn === 80)) qualityBeforeAutoDefault = selectedQn;
+      }
+      if (list.length && videoKey) resetQualityOnNavigation = false;
+      if (!list.length) {
+        selectedQn = 0;
+      } else if (qualityBeforeAutoDefault !== null && list.some((q) => q.qn === 80)) {
+        selectedQn = 80;
+      } else {
+        selectedQn = qualityBeforeAutoDefault ?? selectedQn;
+        qualityBeforeAutoDefault = null;
+        if (qualityStrategy === 'highest') {
+          selectedQn = list.reduce((highest, item) => Number(item.qn) > Number(highest.qn) ? item : highest, list[0]).qn;
+        } else if (!list.some((q) => q.qn === selectedQn)) {
+          selectedQn = list[0].qn;
+        }
+      }
+      syncQualityStrategy();
+    }
+
+    function renderQualityPills(list, videoKey) {
+      if (isSpacePage()) {
+        renderSpaceQuality();
+        return;
+      }
+      qualities = list || [];
+      updateDefaultQuality(qualities, videoKey);
+      [pillsEl, listPillsEl].forEach(clearNode);
+      if (!qualities.length) {
+        [pillsEl, listPillsEl].forEach((container) => appendTextElement(container, 'span', 'bili-dl-pill disabled', t('qualityNone')));
+        return;
+      }
+      [pillsEl, listPillsEl].forEach((container) => {
+        const frag = document.createDocumentFragment();
+        qualities.forEach((q) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `bili-dl-pill${q.qn === selectedQn ? ' active' : ''}`;
+          btn.dataset.qn = String(q.qn);
+          btn.textContent = localizeQualityLabel(q.label);
+          btn.onclick = () => selectQuality(q.qn);
+          frag.appendChild(btn);
+        });
+        container.appendChild(frag);
+      });
+      refreshFilenamePreview();
+      refreshEstimate();
+    }
+
+    /** 会话内快照缓存：10s 过期，按 href+分 P 区分，重复开面板免重请求 */
+    let snapshotCache = null;
+    let snapshotCacheAt = 0;
+    let snapshotCacheKey = '';
+    const SNAPSHOT_TTL = 10000;
+
+    function snapshotKey() {
+      return `${location.href}#p=${pageIndex}`;
+    }
+
+    async function fetchSnapshot() {
+      const now = Date.now();
+      const key = snapshotKey();
+      if (
+        snapshotCache &&
+        snapshotCacheKey === key &&
+        now - snapshotCacheAt < SNAPSHOT_TTL
+      ) {
+        return snapshotCache;
+      }
+      const res = await agentCall('RESOLVE_VIDEO', { href: location.href, pageIndex });
+      let qRes = { qualities: [], maxLabel: '', loginHint: null };
+      let qualityError = '';
+      try {
+        qRes = await agentCall('GET_QUALITIES', { aid: res.info.aid, cid: res.info.cid, epId: res.info.epId });
+      } catch (error) {
+        qualityError = error?.message || String(error);
+      }
+      if (key !== snapshotKey()) throw new Error('视频已切换，请稍后重试');
+      const snapshot = {
+        info: res.info,
+        qualities: qRes.qualities || [],
+        maxLabel: qRes.maxLabel || '',
+        loginHint: qRes.loginHint || null,
+        qualityError
+      };
+      if (!qualityError) {
+        snapshotCache = snapshot;
+        snapshotCacheAt = now;
+        snapshotCacheKey = key;
+      }
+      return snapshot;
+    }
+
+    async function loadVideoInfo(opening = null) {
+      let collectionNotice = panel.querySelector('#bili-dl-collection-notice');
+      if (isSpaceCollectionsIndex()) {
+        modeTabsEl.classList.add('hidden');
+        panel.querySelector('#bili-dl-space-profile')?.classList.add('hidden');
+        videoBodyEl.classList.add('hidden');
+        listBodyEl.classList.add('hidden');
+        if (!collectionNotice) {
+          collectionNotice = document.createElement('div');
+          collectionNotice.id = 'bili-dl-collection-notice';
+          collectionNotice.className = 'bili-dl-collections-directory';
+          homeEl.prepend(collectionNotice);
+        }
+        collectionNotice.classList.remove('hidden');
+        clearNode(collectionNotice);
+        const header = appendTextElement(collectionNotice, 'div', 'bili-dl-collections-heading', '');
+        appendTextElement(header, 'strong', '', t('spaceCollectionsTitle'));
+        const count = appendTextElement(header, 'span', 'bili-dl-collections-count', '');
+        appendTextElement(collectionNotice, 'p', 'bili-dl-collections-hint', t('spaceCollectionsOpenDetail'));
+        const cards = appendTextElement(collectionNotice, 'div', 'bili-dl-collections-cards', '');
+        const message = appendTextElement(collectionNotice, 'p', 'bili-dl-collections-message', t('spaceCollectionsLoading'));
+        message.setAttribute('role', 'status');
+        const more = appendTextElement(collectionNotice, 'button', 'bili-dl-collections-more hidden', t('spaceCollectionsMore'));
+        more.type = 'button';
+        const requestedHref = location.href;
+        let directoryCursor = null, busy = false;
+        const seen = new Map();
+        function addCard(item) {
+          let url;
+          try {
+            url = new URL(item.url, location.href);
+            if (url.origin !== location.origin || !new RegExp('^/' + mid + '/lists/[0-9]+/?$').test(url.pathname)) return false;
+          } catch { return false; }
+          const key = url.pathname + '?' + (url.searchParams.get('type') || 'season');
+          seen.get(key)?.remove();
+          const card = document.createElement('a');
+          card.className = 'bili-dl-collection-card';card.href = url.href;card.title = item.title;
+          const icon = appendTextElement(card, 'span', 'bili-dl-collection-symbol', '▤');
+          icon.setAttribute('aria-hidden', 'true');
+          const body = appendTextElement(card, 'span', 'bili-dl-collection-copy', '');
+          appendTextElement(body, 'strong', '', item.title);
+          appendTextElement(body, 'small', '', Number.isFinite(item.total) ? t('spaceCollectionsVideoCount', { count: item.total }) : t('spaceCollectionsDetail'));
+          appendTextElement(card, 'span', 'bili-dl-collection-arrow', '→').setAttribute('aria-hidden', 'true');
+          cards.append(card);seen.set(key, card);count.textContent = String(seen.size);
+          return true;
+        }
+        const mid = /^\/(\d+)/.exec(location.pathname)?.[1];
+        const links = new Map();
+        for (const anchor of document.querySelectorAll('a[href]')) {
+          try {
+            const url = new URL(anchor.getAttribute('href'), location.href);
+            if (url.origin !== location.origin || !new RegExp('^/' + mid + '/lists/[0-9]+/?$').test(url.pathname)) continue;
+            const label = anchor.textContent?.replace(/\s+/g, ' ').trim();
+            if (!label) continue;
+            const key = url.pathname + url.search;
+            if (!links.has(key)) links.set(key, { url: url.href, label: label.slice(0, 120) });
+          } catch { /* Ignore unrelated or malformed page links. */ }
+        }
+        for (const { url, label } of [...links.values()].slice(0, 30)) addCard({ url, title: label });
+        async function fetchDirectory() {
+          if (busy) return;
+          busy = true;more.disabled = true;message.textContent = t('spaceCollectionsLoading');
+          try {
+            const result = await agentCall('SPACE_COLLECTIONS', { cursor: directoryCursor });
+            if (requestedHref !== location.href || !cards.isConnected) return;
+            let added = 0;
+            for (const item of result.items || []) {
+              const before = seen.size;if (addCard(item) && seen.size > before) added++;
+            }
+            directoryCursor = result.cursor;
+            more.textContent = t('spaceCollectionsMore');
+            more.classList.toggle('hidden', !result.hasMore || (!added && directoryCursor?.pn > 2));
+            message.textContent = seen.size ? '' : t('spaceCollectionsEmpty');
+          } catch {
+            if (requestedHref !== location.href || !cards.isConnected) return;
+            message.textContent = seen.size ? t('spaceCollectionsFallback') : t('spaceCollectionsFailed');
+            more.classList.remove('hidden');more.textContent = t('spaceCollectionsRetry');
+          } finally { busy = false;more.disabled = false; }
+        }
+        more.onclick = fetchDirectory;
+        void fetchDirectory();
+        return;
+      }
+      collectionNotice?.classList.add('hidden');
+      videoBodyEl.classList.toggle('hidden', activeMode === 'list');
+      listBodyEl.classList.toggle('hidden', activeMode !== 'list');
+      if (isSpaceCollectionPage()) {
+        modeTabsEl.classList.add('hidden');
+        menu.classList.add('is-list-page');
+        panel.querySelector('#bili-dl-space-profile')?.classList.add('hidden');
+        syncSpaceListTools();
+        renderSpaceQuality();
+        if (activeMode !== 'list') await setDownloadMode('list');
+        else if (!listLoaded) await loadListItems();
+        return;
+      }
+      if (isSpacePage()) {
+        modeTabsEl.classList.add('hidden');
+        menu.classList.add('is-list-page');
+        renderSpaceProfile();
+        renderSpaceQuality();
+        if (activeMode !== 'list') await setDownloadMode('list');
+        else if (!listLoaded) await loadListItems();
+        return;
+      }
+      panel.querySelector('#bili-dl-space-profile')?.classList.add('hidden');
+      const requestedHref = location.href;
+      const requestedKey = snapshotKey();
+      setDetect(t('detectRecognizing'), false);
+      setVideoLoading(true);
+      titleEl.textContent = '';
+      authorEl.textContent = '';
+      authorEl.classList.add('hidden');
+      subEl.textContent = '';
+      estimateEl.classList.add('hidden');
+      queueBtn.classList.add('hidden');
+      startBtn.disabled = true;
+      coverDownloadBtn.disabled = true;
+      statusEl.classList.add('hidden');
+      clearNode(pillsEl);
+      appendTextElement(pillsEl, 'span', 'bili-dl-pill loading', '加载中');
+
+      try {
+        await downloadPrefsReady;
+        if (requestedKey !== snapshotKey()) return;
+        const snap = await fetchSnapshot();
+        if (requestedKey !== snapshotKey()) return;
+        videoInfo = snap.info;
+        collectionHref = requestedHref;
+        const listAvailable = isListPage();
+        modeTabsEl.classList.toggle('hidden', !listAvailable);
+        menu.classList.toggle('is-list-page', listAvailable);
+        if (listAvailable && activeMode !== 'list' && opening && opening === panelOpening) {
+          void setDownloadMode('list', false);
+        } else if (!listAvailable && activeMode === 'list' && !operationMode) {
+          await setDownloadMode('video');
+        }
+        setVideoLoading(false);
+        titleEl.textContent = videoInfo.title;
+        setDetect(t('detectReady'), true);
+
+        if (videoInfo.author) {
+          authorEl.textContent = videoInfo.author;
+          authorEl.classList.remove('hidden');
+        } else {
+          authorEl.classList.add('hidden');
+        }
+
+        if (videoInfo.pic) {
+          coverImg.src = normalizeCoverUrl(videoInfo.pic);
+          const showCover = () => {
+            coverImg.classList.remove('hidden');
+            coverPh.classList.add('hidden');
+            coverSk.classList.add('hidden');
+          };
+          const showCoverFallback = () => {
+            coverImg.classList.add('hidden');
+            coverPh.classList.remove('hidden');
+            coverSk.classList.add('hidden');
+          };
+          if (coverImg.complete) {
+            coverImg.naturalWidth ? showCover() : showCoverFallback();
+          } else {
+            coverImg.onload = showCover;
+            coverImg.onerror = showCoverFallback;
+          }
+          coverDownloadBtn.disabled = false;
+        } else {
+          coverPh.classList.remove('hidden');
+          coverSk.classList.add('hidden');
+        }
+
+        const parts = [];
+        if (videoInfo.view) parts.push(formatView(videoInfo.view) + ' ' + t('unitPlay'));
+        if (videoInfo.pubdate) parts.push(formatTime(videoInfo.pubdate));
+        subEl.textContent = parts.length ? parts.join(' · ') : t('biliVideo');
+
+        if (isMultiPartVideo(videoInfo.pages)) {
+          pagesEl.classList.remove('hidden');
+          clearNode(pagesEl);
+          const frag = document.createDocumentFragment();
+          videoInfo.pages.forEach((p, i) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `bili-dl-page-btn${i === pageIndex ? ' active' : ''}`;
+            btn.dataset.index = String(i);
+            btn.textContent = `P${p.page}`;
+            frag.appendChild(btn);
+          });
+          pagesEl.appendChild(frag);
+          pagesEl.querySelectorAll('.bili-dl-page-btn').forEach((btn) => {
+            btn.onclick = () => {
+              const nextPageIndex = Number(btn.dataset.index);
+              if (pageIndex !== nextPageIndex) videoSourceRevision++;
+              pageIndex = nextPageIndex;
+              snapshotCache = null;
+              snapshotCacheKey = '';
+              loadVideoInfo();
+            };
+          });
+          queueBtn.classList.remove('hidden');
+          setQueueLabel(videoInfo.pages.length);
+        } else {
+          pagesEl.classList.add('hidden');
+          queueBtn.classList.add('hidden');
+        }
+
+        if (selectedFormat === 'm4a') {
+          if (qualitySection) qualitySection.classList.add('hidden');
+        } else {
+          if (qualitySection) qualitySection.classList.remove('hidden');
+        }
+        renderQualityPills(snap.qualities, `${videoInfo.aid}:${videoInfo.cid}:${videoInfo.epId || ''}`);
+        if (snap.qualityError) {
+          showDownloadError(t('qualityErrorPrefix') + snap.qualityError);
+          debugLog('清晰度', snap.qualityError);
+        }
+        if (snap.qualities.some((q) => q.mode === 'dash')) {
+          setupMuxInPage().catch(() => {});
+        }
+        refreshStartBtnForQueue();
+
+        debugLog('加载', `${videoInfo.aid}/${videoInfo.cid} · ${snap.qualities.map((q) => q.label).join(', ')}`);
+      } catch (err) {
+        if (requestedKey !== snapshotKey()) return;
+        setDetect(t('detectFailed'), false);
+        setVideoLoading(false);
+        titleEl.textContent = t('loadFailed');
+        subEl.textContent = translateUserError(err.message);
+        coverPh.classList.remove('hidden');
+        coverSk.classList.add('hidden');
+        showDownloadError(translateUserError(err.message));
+        debugLog('错误', err.message);
+      }
+    }
+
+    function getSelectedQualityLabel() {
+      return qualities.find((q) => q.qn === selectedQn)?.label || '';
+    }
+
+    function buildFilenameBase(info, qn, format, opts = {}) {
+      const Filename = globalThis.BiliDlFilename;
+      const qualityLabel = format === 'm4a'
+        ? '音频'
+        : (opts.qualityLabel || qualities.find((q) => q.qn === qn)?.label || `${qn}P`);
+      const template = opts.filenameTemplate || filenameTemplate;
+      const meta = {
+        title: info?.title,
+        author: info?.author,
+        bvid: info?.bvid,
+        part: opts.part != null ? opts.part : (info?.page || info?.part || ((opts.pageIndex != null ? opts.pageIndex : 0) + 1)),
+        partTitle: opts.partTitle || info?.partTitle || info?.title
+      };
+      if (Filename?.renderTemplate) {
+        try {
+          return Filename.renderTemplate(template, meta, {
+            format,
+            qualityLabel,
+            index: opts.index != null ? opts.index : 1,
+            batchIndex: opts.batchIndex,
+            createdAt: opts.createdAt || Date.now()
+          });
+        } catch {
+          /* fall through to safe default */
+        }
+      }
+      const title = String(info?.title || 'bilibili-video').replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').trim() || 'bilibili-video';
+      if (Filename?.renderTemplate) return Filename.renderTemplate('{title}', { title }, { format, batchIndex: opts.batchIndex });
+      return Array.from(title).slice(0, 60).join('').replace(/[. ]+$/g, '') || 'bilibili-video';
+    }
+
+    function refreshFilenamePreview() {
+      if (!filenamePreviewEl) return;
+      if (!videoInfo) {
+        filenamePreviewEl.textContent = t('filenamePreviewPending');
+        return;
+      }
+      const ext = selectedFormat === 'm4a' ? 'm4a' : 'mp4';
+      const base = buildFilenameBase(videoInfo, selectedQn, selectedFormat, {
+        pageIndex,
+        part: videoInfo.pages?.[pageIndex]?.page || (pageIndex + 1),
+        partTitle: videoInfo.pages?.[pageIndex]?.part || videoInfo.title,
+        index: 1
+      });
+      const label = document.createElement('span');
+      label.className = 'bili-dl-filename-preview-label';
+      label.textContent = t('saveAsLabel');
+      const filename = document.createElement('span');
+      filename.className = 'bili-dl-filename-preview-name';
+      filename.textContent = `${base}.${ext}`;
+      filename.title = filename.textContent;
+      filenamePreviewEl.replaceChildren(label, filename);
+    }
+
+
+    async function ensureMuxReady() {
+      const sel = qualities.find((q) => q.qn === selectedQn);
+      if (sel?.mode !== 'dash') return true;
+      try {
+        await setupMuxInPage();
+        return true;
+      } catch {
+        showDownloadError(t('refreshPageRetry'));
+        return false;
+      }
+    }
+
+    function captureDownloadJob() {
+      const sel = qualities.find((q) => q.qn === selectedQn);
+      const createdAt = Date.now();
+      const label = selectedFormat === 'm4a' ? '音频' : getSelectedQualityLabel();
+      const filenameSnapshot = {
+        filenameTemplate,
+        createdAt,
+        index: 1,
+        pageIndex,
+        part: videoInfo.pages?.[pageIndex]?.page || (pageIndex + 1),
+        partTitle: videoInfo.pages?.[pageIndex]?.part || videoInfo.title,
+        qualityLabel: label
+      };
+      return {
+        scope: 'video',
+        info: {
+          bvid: videoInfo.bvid,
+          aid: videoInfo.aid,
+          cid: videoInfo.cid,
+          epId: videoInfo.epId,
+          title: videoInfo.title,
+          author: videoInfo.author || '',
+          page: filenameSnapshot.part,
+          partTitle: filenameSnapshot.partTitle
+        },
+        qn: selectedQn,
+        format: selectedFormat,
+        streamPreference,
+        mode: sel?.mode || 'durl',
+        pageIndex,
+        label,
+        estimatedBytes: currentEstimateBytes,
+        ...filenameSnapshot,
+        filenameBase: buildFilenameBase(videoInfo, selectedQn, selectedFormat, filenameSnapshot)
+      };
+    }
+
+    function canStartCurrentDownload() {
+      if (!videoInfo) return false;
+      if (selectedFormat === 'm4a') return true;
+      return !!selectedQn;
+    }
+
+    function refreshStartBtnForParallel() {
+      if (queueRunning) return;
+      const n = activeJobs.size;
+      const largeRunning = [...activeJobs.values()].some((job) => isLargeMerge(job));
+      startBtn.disabled = pickingVideoDirectory || !canStartCurrentDownload() || largeRunning;
+      if (n > 0) {
+        startBtn.textContent = largeRunning ? '大文件处理中' : (n >= PARALLEL_MAX ? `并行已满 (${n})` : `再下一个 (${n})`);
+        queueBtn.disabled = true;
+      } else {
+        restoreStartButtonContent();
+        queueBtn.disabled = pickingVideoDirectory;
+      }
+    }
+
+    // 兼容旧调用名
+    function refreshStartBtnForQueue() {
+      refreshStartBtnForParallel();
+    }
+
+    async function checkDownloadContext() {
+      let timer;
+      try {
+        if (!EXT.runtime?.id) throw new Error('Extension context invalidated');
+        const response = await Promise.race([
+          EXT.runtime.sendMessage({ type: 'BILI_DL_CHECK_DOWNLOAD_CONTEXT' }),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('扩展连接检查超时')), 15000);
+          })
+        ]);
+        if (!response?.ok || response.version !== VERSION) throw new Error(response?.error || '扩展版本或连接已改变');
+      } catch (error) {
+        debugLog('连接', `下载前检查失败：${error?.message || error}`);
+        throw new Error('扩展连接检查失败，请刷新当前 B 站页面后重试');
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function runSingleDownload(info, opts = {}) {
+      await checkDownloadContext();
+      const format = opts.format || selectedFormat;
+      const qn = opts.qn != null ? opts.qn : selectedQn;
+      const streamSelection = opts.streamPreference || streamPreference;
+      const jobId = opts.jobId || null;
+      const shouldCancel = () => Boolean(activeJobs.get(jobId)?.cancelRequested || (queueRunning && queueCancelled));
+      const job = jobId ? activeJobs.get(jobId) : null;
+      const filenameBase = opts.filenameBase
+        || job?.filenameBase
+        || buildFilenameBase(info, qn, format, {
+          filenameTemplate: opts.filenameTemplate || job?.filenameTemplate || filenameTemplate,
+          createdAt: opts.createdAt || job?.createdAt,
+          index: opts.index != null ? opts.index : (job?.index != null ? job.index : 1),
+          batchIndex: opts.batchIndex ?? job?.batchIndex,
+          pageIndex: opts.pageIndex != null ? opts.pageIndex : job?.pageIndex,
+          part: opts.part != null ? opts.part : job?.part,
+          partTitle: opts.partTitle || job?.partTitle || info?.partTitle,
+          qualityLabel: opts.qualityLabel || job?.label
+        });
+      await waitWhileQueuePaused();
+      if (shouldCancel()) throw new Error('下载已取消');
+
+      if (format === 'm4a') {
+        const result = await agentCall('START_DOWNLOAD', {
+          aid: info.aid,
+          cid: info.cid,
+          epId: info.epId,
+          title: info.title,
+          filenameBase,
+          audioOnly: true,
+          jobId
+        }, 0);
+        result.downloadId = await downloadBlob(result.blob, result.filename, shouldCancel, info.title, opts.directory);
+        updateProgress('save', 100, 0, 0, jobId);
+        return result;
+      }
+
+      // Every video entry point (single, multi-P and collection/space batches)
+      // can resolve to DASH even when its quality metadata originally said durl.
+      await setupMuxInPage();
+      if (shouldCancel()) throw new Error('下载已取消');
+      const result = await agentCall('START_DOWNLOAD', {
+        aid: info.aid,
+        cid: info.cid,
+        epId: info.epId,
+        qn,
+        streamPreference: streamSelection,
+        title: info.title,
+        filenameBase,
+        includeAudioBlob: opts.reuseAudio === true,
+        jobId
+      }, 0);
+
+      if (Number(result.actualQn) > 0 && Number(result.actualQn) !== Number(qn)) {
+        const actualLabel = result.actualLabel || `${result.actualQn}P`;
+        const adjustedBase = buildFilenameBase(info, result.actualQn, 'mp4', {
+          filenameTemplate: opts.filenameTemplate || job?.filenameTemplate || filenameTemplate,
+          createdAt: opts.createdAt || job?.createdAt,
+          index: opts.index ?? job?.index ?? 1,
+          batchIndex: opts.batchIndex ?? job?.batchIndex,
+          pageIndex: opts.pageIndex ?? job?.pageIndex,
+          part: opts.part ?? job?.part,
+          partTitle: opts.partTitle || job?.partTitle || info.partTitle,
+          qualityLabel: actualLabel
+        });
+        result.filename = `${adjustedBase}.mp4`;
+        if (job) {
+          job.label = actualLabel;
+          job.filenameBase = adjustedBase;
+          const label = job.cardEl?.querySelector('.bili-dl-progress-q');
+          if (label) label.textContent = actualLabel;
+        }
+        debugLog('清晰度', `片源发生变化：请求 ${qn}，实际 ${result.actualQn}（${actualLabel}），已同步文件名`);
+        if (videoInfo?.aid === info.aid && videoInfo?.cid === info.cid) {
+          snapshotCache = null;
+          const remaining = qualities.filter(quality => Number(quality.qn) !== Number(qn) && Number(quality.qn) !== Number(result.actualQn));
+          renderQualityPills([...remaining, { qn: Number(result.actualQn), label: actualLabel, mode: result.dash === false ? 'durl' : 'dash' }]);
+        }
+      }
+      if (result.blob) {
+        updateProgress('save', 95, 0, 0, jobId);
+        const blob = result.blob || new Blob([result.mp4], { type: 'video/mp4' });
+        result.downloadId = await downloadBlob(blob, result.filename, shouldCancel, info.title, opts.directory);
+        updateProgress('save', 100, 0, 0, jobId);
+      } else {
+        throw new Error('保存数据不可用，请刷新页面后重试');
+      }
+      return result;
+    }
+
+    async function saveReusedAudio(result, filenameBase, shouldCancel, jobId, title, directory) {
+      const audioBlob = result?.audioBlob;
+      if (!audioBlob?.size) return null;
+      const filename = `${filenameBase}.m4a`;
+      updateProgress('save', 95, 0, 0, jobId);
+      const downloadId = await downloadBlob(audioBlob, filename, shouldCancel, title, directory);
+      updateProgress('save', 100, 0, 0, jobId);
+      return { audioOnly: true, reusedAudio: true, filename, downloadId };
+    }
+
+    function finishActiveJob(jobId) {
+      removeJobCard(jobId);
+      if (!queueRunning && activeJobs.size === 0) operationMode = null;
+      refreshStartBtnForParallel();
+    }
+
+    async function launchVideoTask(seed, event) {
+      if (queueRunning || pickingVideoDirectory) return;
+      const seedIsLarge = isLargeMerge(seed);
+      const activeLarge = [...activeJobs.values()].some((job) => isLargeMerge(job));
+      if ((seedIsLarge && activeJobs.size > 0) || activeLarge) {
+        showStatus('error', t('bigFileBusy'));
+        return;
+      }
+      if (activeJobs.size >= PARALLEL_MAX) {
+        showStatus('error', t('parallelMax', { max: PARALLEL_MAX }));
+        return;
+      }
+
+      const href = location.href;
+      const sourceRevision = videoSourceRevision;
+      const sameSource = () => location.href === href && videoSourceRevision === sourceRevision;
+      const retryButton = event?.currentTarget;
+      pickingVideoDirectory = true;
+      let directory;
+      try {
+        const pendingDirectory = pickBatchDirectory(event);
+        refreshStartBtnForParallel();
+        directory = await pendingDirectory;
+      } catch (error) {
+        if (sameSource()) {
+          const keepRetry = seed.state === TASK_STATE.failed && retryButton && statusEl.contains(retryButton);
+          showStatus('error', error.message);
+          if (keepRetry) statusEl.appendChild(retryButton);
+        }
+        return;
+      } finally {
+        pickingVideoDirectory = false;
+        refreshStartBtnForParallel();
+      }
+      if (directory === undefined || !sameSource()) return;
+
+      const job = createDownloadTask({
+        ...seed,
+        jobId: '',
+        attempts: (seed.attempts || 0) + 1,
+        recorded: false,
+        directorySave: Boolean(directory)
+      });
+      operationMode = 'video';
+      const jobId = job.jobId;
+      debugLog('下载', `准备启动 ${jobId}：${job.info.title || '视频'}`);
+      activeJobs.set(jobId, job);
+      mountJobCard(job);
+      updateProgress('prepare', 0, 0, 0, jobId);
+      refreshStartBtnForParallel();
+      statusEl.classList.add('hidden');
+      debugLog('下载', `并行启动 ${jobId} · 当前 ${activeJobs.size} 个`);
+
+      (async () => {
+        try {
+          const result = await runSingleDownload(job.info, {
+            qn: job.qn,
+            format: job.format,
+            streamPreference: job.streamPreference,
+            directory,
+            jobId,
+            filenameBase: job.filenameBase,
+            filenameTemplate: job.filenameTemplate,
+            createdAt: job.createdAt,
+            index: job.index,
+            pageIndex: job.pageIndex,
+            part: job.part,
+            partTitle: job.partTitle,
+            qualityLabel: job.label
+          });
+          if (result.videoOnly) {
+            setTaskState(job, TASK_STATE.completed);
+            showStatus('success', t('savedVideoOnly', { title: job.info.title || '' }), !directory);
+          } else {
+            const fmt = result.audioOnly ? 'm4a' : 'mp4';
+            addHistory({
+              bvid: job.info.bvid,
+              epId: job.info.epId,
+              aid: job.info.aid,
+              cid: job.info.cid,
+              pageIndex: job.pageIndex,
+              title: job.info.title,
+              label: fmt === 'm4a' ? t('audioLabelShort') : job.label,
+              format: fmt,
+              downloadId: result.downloadId,
+              ts: Date.now()
+            });
+            showStatus(
+              'success',
+              fmt === 'm4a'
+                ? t('savedM4a', { title: job.info.title || '' })
+                : t('savedMp4', { title: job.info.title || '' }),
+              !directory
+            );
+            setTaskState(job, TASK_STATE.completed);
+          }
+        } catch (err) {
+          const problem = classifyDownloadError(err);
+          if (problem.type === 'cancelled') {
+            setTaskState(job, TASK_STATE.cancelled);
+            showStatus('error', t('cancelledTitle', { title: job.info.title || t('downloadFallback') }));
+          } else {
+            showRetryableDownloadError(job, err);
+            debugLog('错误', problem.message);
+          }
+        } finally {
+          finishActiveJob(jobId);
+        }
+      })();
+    }
+
+    async function startDownload(event) {
+      if (!canStartCurrentDownload() || queueRunning) return;
+      return launchVideoTask(captureDownloadJob(), event);
+    }
+
+    function coverFilename(info, coverUrl, opts = {}) {
+      const safeBase = buildFilenameBase(info, selectedQn, 'cover', {
+        ...opts, qualityLabel: t('listContentCover')
+      });
+      const ext = /\.(jpe?g|png|webp)(?:$|[?@])/i.exec(String(coverUrl || ''))?.[1]?.toLowerCase() || 'jpg';
+      return `${safeBase}.${ext === 'jpeg' ? 'jpg' : ext}`;
+    }
+
+    function normalizeCoverUrl(value) {
+      const sourceUrl = String(value || '').trim();
+      if (sourceUrl.startsWith('//')) return `https:${sourceUrl}`;
+      // B 站 view API 仍可能返回 http 封面；下载 API 不会自动沿用页面的混合内容升级。
+      return sourceUrl.replace(/^http:\/\//i, 'https://');
+    }
+
+    async function downloadCover() {
+      if (!videoInfo?.pic || coverDownloadBtn.disabled) return;
+      coverDownloadBtn.disabled = true;
+      // 浏览器原生下载没有可供面板同步的封面进度，避免展示不准确的状态行。
+      statusEl.classList.add('hidden');
+      try {
+        const url = normalizeCoverUrl(videoInfo.pic).replace(/@[^?]*(?=\?|$)/, '');
+        const filename = coverFilename(videoInfo, url);
+        debugLog('封面', `开始下载：${filename} · ${url}`);
+        const response = await EXT.runtime.sendMessage({
+          type: 'BILI_DL_DOWNLOAD_COVER',
+          url,
+          filename
+        });
+        if (!response?.ok) throw new Error(response?.error || '封面下载失败');
+        debugLog('封面', `下载任务已创建：${response.downloadId}`);
+      } catch (err) {
+        debugLog('封面', `下载失败：${err.message || err}`);
+      } finally {
+        coverDownloadBtn.disabled = !videoInfo?.pic;
+      }
+    }
+
+    async function requestBatchCover(url, filename, shouldCancel) {
+      if (shouldCancel()) throw new Error('下载已取消');
+      const requestId = crypto.randomUUID();
+      let poll;
+      let timer;
+      const stopped = new Promise((_, reject) => {
+        const stop = (message) => {
+          // Do not await cancellation: a disconnected/stalled background must
+          // not keep the content queue locked. Late replies cannot save a file.
+          try {
+            EXT.runtime.sendMessage({ type: 'BILI_DL_CANCEL_COVER', requestId }).catch(() => {});
+          } catch { /* The extension context may have been invalidated. */ }
+          reject(new Error(message));
+        };
+        poll = setInterval(() => { if (shouldCancel()) stop('下载已取消'); }, 100);
+        timer = setTimeout(() => stop(t('batchCoverReadFailed')), 35000);
+      });
+      try {
+        const response = await Promise.race([
+          EXT.runtime.sendMessage({ type: 'BILI_DL_DOWNLOAD_COVER', url, filename, forBatch: true, requestId }),
+          stopped
+        ]);
+        if (shouldCancel()) throw new Error('下载已取消');
+        return response;
+      } finally {
+        clearInterval(poll);
+        clearTimeout(timer);
+      }
+    }
+
+    async function saveListCover(item, shouldCancel, nameOpts = {}, directory = null) {
+      await checkDownloadContext();
+      if (shouldCancel()) throw new Error('下载已取消');
+      let cover = item.cover || item.pic;
+      if (!cover) {
+        const resolved = await agentCall('RESOLVE_VIDEO', { href: item.epId ? `https://www.bilibili.com/bangumi/play/ep${item.epId}` : `https://www.bilibili.com/video/${item.bvid}`, pageIndex: Number(item.pageIndex) || 0 });
+        cover = resolved.info?.pic;
+        item.cover = cover || '';
+      }
+      if (!cover) throw new Error(t('listCoverMissing'));
+      if (shouldCancel()) throw new Error('下载已取消');
+      const url = normalizeCoverUrl(cover).replace(/@[^?]*(?=\?|$)/, '');
+      const filename = coverFilename(item, url, nameOpts);
+      const response = directory
+        ? await requestBatchCover(url, filename, shouldCancel)
+        : await EXT.runtime.sendMessage({ type: 'BILI_DL_DOWNLOAD_COVER', url, filename });
+      if (directory) {
+        if (!response?.ok || !response.base64) throw new Error(t('batchCoverReadFailed'));
+        const bytes = Uint8Array.from(atob(response.base64), (char) => char.charCodeAt(0));
+        const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[response.mime];
+        if (!extension) throw new Error(t('batchCoverReadFailed'));
+        await writeBatchFile(directory, new Blob([bytes], { type: response.mime }), filename.replace(/\.[^.]+$/, '.' + extension), shouldCancel);
+        return;
+      }
+      if (!response?.ok || !Number.isInteger(response.downloadId)) throw new Error(response?.error || t('listCoverFailed'));
+      let lastBytes = -1;
+      let lastProgressAt = Date.now();
+      for (;;) {
+        if (shouldCancel()) {
+          await EXT.runtime.sendMessage({ type: 'BILI_DL_CANCEL_MEDIA', downloadId: response.downloadId });
+          throw new Error('下载已取消');
+        }
+        const state = await EXT.runtime.sendMessage({ type: 'BILI_DL_MEDIA_STATE', downloadId: response.downloadId });
+        if (!state?.ok) throw new Error(state?.error || t('listCoverFailed'));
+        if (state.state === 'complete') return;
+        if (state.state === 'interrupted') throw new Error(`${t('listCoverFailed')}: ${state.error || ''}`);
+        if (state.bytesReceived !== lastBytes) {
+          lastBytes = state.bytesReceived;
+          lastProgressAt = Date.now();
+        } else if (Date.now() - lastProgressAt > 180000) {
+          await EXT.runtime.sendMessage({ type: 'BILI_DL_CANCEL_MEDIA', downloadId: response.downloadId });
+          throw new Error(t('listCoverFailed'));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    async function prepareBatchDestination(event, reportError) {
+      const href = location.href;
+      // Take the queue lock while the native directory dialog is open.
+      queueRunning = true;
+      try {
+        const directory = await pickBatchDirectory(event);
+        return location.href === href ? directory : undefined;
+      } catch (error) {
+        if (location.href === href) reportError(error.message);
+        return undefined;
+      } finally {
+        queueRunning = false;
+        if (location.href !== href) {
+          lastListFailures = [];
+          void restoreIncompleteTasks();
+        }
+      }
+    }
+
+    async function startQueueDownload(retryPlan = null, event) {
+      if (queueRunning || pickingVideoDirectory || activeJobs.size) return;
+      const isRetry = Array.isArray(retryPlan);
+      if (!isRetry && (!canStartCurrentDownload() || !isMultiPartVideo(videoInfo.pages))) return;
+      const concurrency = batchConcurrency;
+      const plan = isRetry ? retryPlan.map((item) => ({ ...item })) : videoInfo.pages.map((_part, index) => {
+        const createdAt = Date.now();
+        const partMeta = videoInfo.pages[index] || {};
+        const label = selectedFormat === 'm4a' ? '音频' : getSelectedQualityLabel();
+        const nameOpts = {
+          filenameTemplate,
+          createdAt,
+          index: index + 1,
+          batchIndex: index + 1,
+          pageIndex: index,
+          part: partMeta.page || (index + 1),
+          partTitle: partMeta.part || videoInfo.title,
+          qualityLabel: label
+        };
+        return {
+          href: location.href,
+          index,
+          qn: selectedQn,
+          format: selectedFormat,
+          streamPreference,
+          label,
+          mode: qualities.find((quality) => quality.qn === selectedQn)?.mode || 'durl',
+          filenameTemplate: nameOpts.filenameTemplate,
+          createdAt: nameOpts.createdAt,
+          batchIndex: nameOpts.index,
+          part: nameOpts.part,
+          partTitle: nameOpts.partTitle,
+          filenameBase: buildFilenameBase({
+            title: partMeta.part || videoInfo.title,
+            author: videoInfo.author,
+            bvid: videoInfo.bvid,
+            page: nameOpts.part,
+            partTitle: nameOpts.partTitle
+          }, selectedQn, selectedFormat, nameOpts)
+        };
+      });
+      if (!plan.length) return;
+      const directory = await prepareBatchDestination(event, (message) => {
+        const retry = statusEl.querySelector('[data-batch-retry]');
+        showStatus('error', message);
+        if (retry) statusEl.appendChild(retry);
+      });
+      if (directory === undefined) {
+        refreshStartBtnForParallel();
+        return;
+      }
+      // Lock before the first await: double-clicks must not start duplicate queues.
+      queueRunning = true;
+      queueCancelled = false;
+      queuePaused = false;
+      operationMode = 'video';
+      startBtn.disabled = true;
+      queueBtn.disabled = true;
+      queueLabelEl.textContent = t('queueAutoParts');
+      statusEl.classList.add('hidden');
+      syncJobListVisibility();
+      let ok = 0, cancelled = 0, errors = 0, nextIndex = 0;
+      const failed = [];
+      try {
+        if (!(await ensureMuxReady())) return;
+        async function runOnePart(entry) {
+          const job = createDownloadTask({
+            scope: 'video', format: entry.format, qn: entry.qn, mode: entry.mode,
+            pageIndex: entry.index, label: `P${entry.index + 1} · ${entry.label}`,
+            info: { title: `P${entry.index + 1}` },
+            filenameTemplate: entry.filenameTemplate,
+            filenameBase: entry.filenameBase,
+            createdAt: entry.createdAt,
+            batchIndex: entry.batchIndex ?? entry.index + 1,
+            index: entry.batchIndex != null ? entry.batchIndex : (entry.index + 1),
+            part: entry.part,
+            partTitle: entry.partTitle,
+            qualityLabel: entry.label
+          });
+          job.directorySave = Boolean(directory);
+          activeJobs.set(job.jobId, job);
+          mountJobCard(job);
+          const check = async () => {
+            await waitWhileQueuePaused();
+            if (queueCancelled || job.cancelRequested) throw new Error('下载已取消');
+          };
+          try {
+            for (let attempt = 0; attempt < 2; attempt++) {
+              await check();
+              try {
+                updateProgress('prepare', 0, 0, 0, job.jobId);
+                const result = await agentCall('RESOLVE_VIDEO', { href: entry.href, pageIndex: entry.index });
+                await check();
+                job.info = result.info;
+                const title = job.cardEl?.querySelector('.bili-dl-progress-title');
+                if (title) { title.textContent = job.info.title; title.title = job.info.title; }
+                const savedResult = await runSingleDownload(job.info, {
+                  qn: entry.qn,
+                  format: entry.format,
+                  streamPreference: entry.streamPreference,
+                  directory,
+                  jobId: job.jobId,
+                  filenameBase: entry.filenameBase || job.filenameBase,
+                  filenameTemplate: entry.filenameTemplate || job.filenameTemplate,
+                  createdAt: entry.createdAt || job.createdAt,
+                  batchIndex: entry.batchIndex ?? entry.index + 1,
+                  index: entry.batchIndex != null ? entry.batchIndex : (entry.index + 1),
+                  pageIndex: entry.index,
+                  part: entry.part,
+                  partTitle: entry.partTitle || job.info?.partTitle,
+                  qualityLabel: entry.label
+                });
+                ok++;
+                setTaskState(job, TASK_STATE.completed);
+                await addHistory({ bvid: job.info.bvid, epId: job.info.epId, aid: job.info.aid, cid: job.info.cid,
+                  pageIndex: entry.index, title: job.info.title, label: savedResult.actualLabel || entry.label, format: entry.format, downloadId: savedResult.downloadId, ts: Date.now() })
+                  .catch((error) => debugLog('历史', '分 P 已保存，历史记录写入失败：' + error.message));
+                return;
+              } catch (error) {
+                const problem = classifyDownloadError(error);
+                // Retrying an uncertain disk save could create a duplicate file.
+                if (attempt || problem.type !== 'network' || queueCancelled || job.cancelRequested) throw error;
+                job.attempts++;
+                updateProgress('queue', 0, 0, 0, job.jobId);
+                const phase = job.cardEl?.querySelector('.bili-dl-job-phase');
+                if (phase) phase.textContent = t('networkRetryLater');
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
+            }
+          } catch (error) {
+            const problem = classifyDownloadError(error);
+            if (problem.type === 'cancelled' || queueCancelled || job.cancelRequested) {
+              cancelled++;
+              failed.push({ ...entry, message: problem.message });
+              setTaskState(job, TASK_STATE.cancelled);
+            } else {
+              errors++;
+              failed.push({ ...entry, message: problem.message });
+              job.retryPart = entry;
+              job.error = problem;
+              setTaskState(job, TASK_STATE.failed, problem.message);
+              debugLog('队列', `P${entry.index + 1} 失败：${problem.message}`);
+              if (problem.type === 'save' || problem.type === 'extension') {
+                // Preserve every not-yet-started part for one-click retry, and
+                // stop fetching more files when the browser cannot save them.
+                for (const waiting of plan.slice(nextIndex)) {
+                  failed.push({ ...waiting, message: problem.message });
+                }
+                nextIndex = plan.length;
+              }
+            }
+          } finally { removeJobCard(job.jobId); }
+        }
+        async function worker() {
+          while (nextIndex < plan.length && !queueCancelled) {
+            await waitWhileQueuePaused();
+            if (queueCancelled || nextIndex >= plan.length) break;
+            await runOnePart(plan[nextIndex++]);
+          }
+        }
+        const workers = Math.min(concurrency, plan.length);
+        await Promise.all(Array.from({ length: workers }, () => worker()));
+        if (queueCancelled) {
+          for (const waiting of plan.slice(nextIndex)) failed.push({ ...waiting, message: t('listQueueCancelledPending') });
+        }
+        failed.sort((a, b) => a.batchIndex - b.batchIndex);
+        const counts = t('queueSummary', {
+          ok,
+          fail: errors,
+          cancelled: cancelled ? t('queueSummaryCancelled', { count: cancelled }) : ''
+        });
+        showStatus(failed.length || queueCancelled ? 'error' : 'success',
+          `${queueCancelled ? t('queueCancelledTitle') : t('queueFinishedTitle')}：${counts}${failed.length ? t('queuePartFailed', { part: failed[0].index + 1, message: translateUserError(failed[0].message) }) : ''}`, !directory);
+        if (failed.length) {
+          const retry = appendTextElement(statusEl, 'button', 'bili-dl-status-action', t('queueRetryFailedOnly', { count: failed.length }));
+          retry.type = 'button';
+          retry.dataset.batchRetry = '1';
+          retry.onclick = (click) => startQueueDownload(failed, click);
+        }
+      } catch (error) {
+        showStatus('error', t('queueStopped', { error: translateUserError(error.message || error) }));
+      } finally {
+        queueRunning = false;
+        operationMode = null;
+        resetQueueCancelButton();
+        setQueueLabel(videoInfo?.pages?.length || plan.length);
+        refreshStartBtnForParallel();
+      }
+    }
+
+    async function startListDownload(retryTasks = null, event) {
+      const isRetry = Array.isArray(retryTasks);
+      if (!isRetry && (pendingListSync || listLoading)) { scheduleListSync(); return; }
+      const retryEntries = isRetry ? retryTasks.filter((entry) => entry?.item) : [];
+      const items = isRetry
+        ? retryEntries.map((entry) => entry.item)
+        : listItems.filter((item) => selectedListKeys.has(listItemKey(item)) && canSelectListItem(item));
+      if (!items.length || queueRunning || pickingVideoDirectory || spaceGathering || (!isRetry && !listContentParts(listDownloadKind).length)) return;
+      if (activeJobs.size > 0) {
+        setListStatus(t('listWaitCurrent'), 'error');
+        return;
+      }
+      const concurrency = batchConcurrency;
+      const queueFilenameTemplate = filenameTemplate;
+      const queueCreatedAt = Date.now();
+      const queueQn = selectedQn;
+      const queueStrategy = effectiveQualityStrategy();
+      const queueSpaceTier = isSpacePage() || isSpaceCollectionPage() ? spaceQualityTier : null;
+      const queueStreamPreference = streamPreference;
+      const queueDownloadKind = retryEntries[0]?.downloadKind || listDownloadKind;
+      const pageCheckpointKey = incompleteKey();
+      // Both retry entry points supply tasks from one source list.
+      const checkpointKey = retryEntries[0]?.checkpointKey || pageCheckpointKey;
+      const directory = await prepareBatchDestination(event, (message) => {
+        if (activeMode === 'list') setListStatus(message, 'error');
+        else showStatus('error', message);
+      });
+      if (directory === undefined) {
+        updateListSelection();
+        updateListRetryFailed();
+        return;
+      }
+      queueRunning = true;
+      updateListSelection();
+      operationMode = 'list';
+      queueCancelled = false;
+      queuePaused = false;
+      syncJobListVisibility();
+      listStartBtn.disabled = true;
+      updateListRetryFailed();
+      if (activeMode !== 'list') void setDownloadMode('list', false);
+      let ok = 0;
+      let fail = 0;
+      let cancelled = 0;
+      let downgraded = 0;
+      const failedTasks = [];
+      let stopReason = '';
+      let nextIndex = 0;
+      const started = new Set();
+      const itemKeys = new Set(items.map(listItemKey));
+      const untouched = (task) => task?.item && task.downloadKind && !itemKeys.has(listItemKey(task.item));
+      let retainedFailures = isRetry && checkpointKey === pageCheckpointKey ? lastListFailures.filter(untouched) : [];
+      const pendingTasks = items.map((item, index) => {
+        const entry = retryEntries[index];
+        return {
+          ...entry, item, checkpointKey,
+          requestedQn: entry?.requestedQn || queueQn,
+          downloadKind: entry?.downloadKind || queueDownloadKind,
+          filenameTemplate: entry?.filenameTemplate || queueFilenameTemplate,
+          createdAt: entry?.createdAt || queueCreatedAt,
+          index: entry?.index ?? index + 1,
+          batchIndex: entry?.batchIndex ?? entry?.index ?? index + 1,
+          qualityStrategy: entry?.qualityStrategy || (isRetry ? 'exact' : queueStrategy),
+          spaceQualityTier: entry?.spaceQualityTier || (isRetry ? null : queueSpaceTier),
+          streamPreference: entry?.streamPreference || queueStreamPreference
+        };
+      });
+      let checkpointTail = Promise.resolve();
+      function checkpoint() {
+        checkpointTail = checkpointTail.then(writeCheckpoint);
+        return checkpointTail;
+      }
+      async function writeCheckpoint() {
+        try {
+          if (isRetry) {
+            const stored = (await EXT.storage.local.get(checkpointKey))[checkpointKey];
+            if (Array.isArray(stored)) retainedFailures = stored.filter(untouched);
+          }
+          const remaining = [...pendingTasks.filter((task) => task.downloadKind), ...retainedFailures];
+          if (remaining.length) await EXT.storage.local.set({ [checkpointKey]: remaining });
+          else await EXT.storage.local.remove(checkpointKey);
+        } catch (error) { debugLog('队列', '保存未完成任务失败：' + error.message); }
+      }
+      try {
+        await checkpoint();
+        async function runItem(index) {
+          started.add(index);
+          const item = items[index];
+          const retryTask = pendingTasks[index];
+          const downloadKind = retryTask?.downloadKind || queueDownloadKind;
+          const outputs = listContentParts(downloadKind);
+          const wantsVideo = outputs.includes('video');
+          const wantsAudio = outputs.includes('audio');
+          const wantsCover = outputs.includes('cover');
+          const outputFormat = wantsVideo ? 'mp4' : 'm4a';
+          const contentLabel = listDownloadKindLabel(downloadKind);
+          const jobId = `list-${Date.now()}-${index}`;
+          const createdAt = retryTask.createdAt;
+          const nameOpts = {
+            filenameTemplate: retryTask.filenameTemplate,
+            createdAt,
+            index: retryTask.index,
+            batchIndex: retryTask.batchIndex,
+            pageIndex: Number(item.pageIndex) || 0,
+            part: item.part || 1,
+            partTitle: item.partTitle || item.title,
+            qualityLabel: !wantsVideo
+              ? '音频'
+              : getSelectedQualityLabel()
+          };
+          const filenameBase = buildFilenameBase({
+            title: item.title,
+            author: item.author,
+            bvid: item.bvid,
+            page: item.part || 1,
+            partTitle: item.partTitle || item.title
+          }, queueQn, outputFormat, nameOpts);
+          const audioFilenameBase = wantsAudio
+            ? buildFilenameBase({ title: item.title, author: item.author, bvid: item.bvid, page: item.part || 1, partTitle: item.partTitle || item.title }, queueQn, 'm4a', { ...nameOpts, qualityLabel: '音频' })
+            : '';
+          const job = createDownloadTask({
+            jobId,
+            scope: 'list',
+            queueIndex: index + 1,
+            queueTotal: items.length,
+            info: item,
+            format: outputFormat,
+            downloadKind,
+            label: `列表 · ${contentLabel}${wantsVideo ? ` · ${getSelectedQualityLabel()}` : ''}`,
+            filenameTemplate: retryTask.filenameTemplate,
+            filenameBase,
+            audioFilenameBase,
+            createdAt,
+            index: nameOpts.index,
+            batchIndex: nameOpts.batchIndex,
+            pageIndex: nameOpts.pageIndex,
+            part: item.part || 1,
+            partTitle: item.partTitle || item.title
+          });
+          job.directorySave = Boolean(directory);
+          activeJobs.set(jobId, job);
+          mountJobCard(job);
+          setListStatus(t('listDownloading', { index: job.queueIndex, total: job.queueTotal, title: item.title }), '', { progress: true });
+          updateProgress('prepare', 0, 0, 0, jobId);
+          const check = async () => {
+            await waitWhileQueuePaused();
+            if (queueCancelled || job.cancelRequested) throw new Error('下载已取消');
+          };
+          try {
+            let qn = Number(retryTask?.requestedQn) || queueQn;
+            await check();
+            if (wantsVideo || wantsAudio) await ensureListItemVideoIds(item);
+            await check();
+            job.info.aid = item.aid;
+            job.info.cid = item.cid;
+            let wasDowngraded = false;
+            let actualLabel = '音频';
+            if (wantsVideo) {
+              await check();
+              const qualityData = await agentCall('GET_QUALITIES', { aid: item.aid, cid: item.cid, epId: item.epId });
+              await check();
+              const available = qualityData.qualities || [];
+              const taskSpaceTier = retryTask.spaceQualityTier;
+              if (retryTask.qualityStrategy === 'highest' && available.length) {
+                qn = available.reduce((highest, quality) => Number(quality.qn) > Number(highest.qn) ? quality : highest, available[0]).qn;
+              }
+              const requested = available.find((quality) => quality.qn === qn);
+              const actualQuality = taskSpaceTier ? chooseSpaceQuality(available, taskSpaceTier)
+                : requested || available.filter((quality) => Number(quality.qn) < Number(qn))
+                  .sort((a, b) => Number(b.qn) - Number(a.qn))[0];
+              qn = actualQuality?.qn;
+              if (!qn) throw new Error('该视频没有可下载的清晰度');
+              wasDowngraded = !taskSpaceTier && !requested;
+              job.requestedQn = qn;
+              retryTask.requestedQn = qn;
+              // A resolved item retries its actual quality; unstarted items
+              // retain the strategy captured when their batch was created.
+              retryTask.qualityStrategy = 'exact';
+              retryTask.spaceQualityTier = null;
+              actualLabel = actualQuality.label || `${qn}P`;
+            }
+            job.label = `列表 · ${contentLabel}${wantsVideo ? ` · ${actualLabel}` : ''}${wasDowngraded ? '（降级）' : ''}`;
+            // Resolve per-video quality before freezing the output name. Space
+            // queues can select a different quality from the current video.
+            if (wantsVideo) {
+              job.filenameBase = buildFilenameBase(item, qn, 'mp4', {
+                filenameTemplate: job.filenameTemplate,
+                createdAt: job.createdAt,
+                index: job.index,
+                batchIndex: job.batchIndex,
+                pageIndex: job.pageIndex,
+                part: job.part,
+                partTitle: job.partTitle,
+                qualityLabel: actualLabel
+              });
+            }
+            const labelEl = job.cardEl?.querySelector('.bili-dl-progress-q');
+            if (labelEl) labelEl.textContent = job.label;
+            let videoResult = null;
+            let audioResult = null;
+            if (wantsVideo) {
+              videoResult = await runSingleDownload(item, {
+                qn, format: 'mp4', streamPreference: retryTask.streamPreference, jobId,
+                filenameBase: job.filenameBase, filenameTemplate: job.filenameTemplate,
+                createdAt: job.createdAt, index: job.index, qualityLabel: actualLabel,
+                reuseAudio: wantsAudio, directory
+              });
+              if (videoResult.actualLabel) actualLabel = videoResult.actualLabel;
+              if (Number(videoResult.actualQn) > 0 && Number(videoResult.actualQn) !== Number(qn)) wasDowngraded = Number(videoResult.actualQn) < Number(qn);
+              job.videoSaved = true;
+              retryTask.downloadKind = outputs.filter(part => !job[`${part}Saved`]).join('+');
+              await checkpoint();
+              await addHistory({ bvid: item.bvid, epId: item.epId, aid: item.aid, cid: item.cid, pageIndex: Number(item.pageIndex) || 0, title: item.title, label: `视频 · ${actualLabel}`, format: 'mp4', downloadId: videoResult?.downloadId, downgraded: wasDowngraded, ts: Date.now() }).catch((error) => debugLog('历史', '视频已保存，历史记录写入失败：' + error.message));
+            }
+            if (wantsAudio) {
+              await check();
+              if (wantsVideo && wantsAudio) {
+                job.label = '列表 · 仅音频';
+                if (labelEl) labelEl.textContent = job.label;
+              }
+              const reused = wantsVideo && wantsAudio
+                ? await saveReusedAudio(videoResult, job.audioFilenameBase, () => Boolean(activeJobs.get(jobId)?.cancelRequested || queueCancelled), jobId, item.title, directory)
+                : null;
+              if (!reused) {
+                audioResult = await runSingleDownload(item, {
+                  qn, format: 'm4a', streamPreference: retryTask.streamPreference, jobId,
+                  filenameBase: job.audioFilenameBase, filenameTemplate: job.filenameTemplate,
+                  createdAt: job.createdAt, index: job.index, qualityLabel: '音频', directory
+                });
+              }
+              job.audioSaved = true;
+              retryTask.downloadKind = outputs.filter(part => !job[`${part}Saved`]).join('+');
+              await checkpoint();
+              await addHistory({ bvid: item.bvid, epId: item.epId, aid: item.aid, cid: item.cid, pageIndex: Number(item.pageIndex) || 0, title: item.title, label: '音频', format: 'm4a', downloadId: (reused || audioResult)?.downloadId, ts: Date.now() }).catch((error) => debugLog('历史', '音频已保存，历史记录写入失败：' + error.message));
+            }
+            if (wantsCover) {
+              await check();
+              await saveListCover(item, () => queueCancelled || job.cancelRequested, {
+                filenameTemplate: job.filenameTemplate, createdAt: job.createdAt,
+                index: job.index, batchIndex: job.batchIndex, part: job.part, partTitle: job.partTitle
+              }, directory);
+              job.coverSaved = true;
+              retryTask.downloadKind = '';
+              await checkpoint();
+            }
+            ok++;
+            if (wasDowngraded) downgraded++;
+            if (checkpointKey === incompleteKey()) {
+              selectedListKeys.delete(listItemKey(item));
+              listItemsEl.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+                if ((input.dataset.listKey || input.dataset.bvid) === listItemKey(item)) input.checked = false;
+              });
+            }
+            setTaskState(job, TASK_STATE.completed);
+            debugLog('列表', `完成 ${index + 1}/${items.length}：${item.title}`);
+          } catch (error) {
+            const problem = classifyDownloadError(error);
+            if (problem.type === 'cancelled') {
+              cancelled++;
+              const remaining = outputs.filter((part) => !job[`${part}Saved`]).join('+');
+              if (remaining) failedTasks.push({ ...retryTask, item, requestedQn: Number(retryTask?.requestedQn) || queueQn, downloadKind: remaining, message: '已取消，可重试' });
+              setTaskState(job, TASK_STATE.cancelled);
+              debugLog('列表', `已取消 ${index + 1}/${items.length}：${item.title}`);
+            } else {
+              fail++;
+              job.error = problem;
+              setTaskState(job, TASK_STATE.failed, problem.message);
+              const remaining = outputs.filter((part) => !job[`${part}Saved`]).join('+');
+              job.retryTask = { ...retryTask, item, requestedQn: Number(retryTask?.requestedQn) || queueQn, downloadKind: remaining, title: item.title, message: problem.message };
+              failedTasks.push(job.retryTask);
+              debugLog('列表', `失败 ${index + 1}/${items.length}：${item.title} · ${problem.message}`);
+            }
+          } finally {
+            removeJobCard(jobId);
+            if (job.error?.type === 'save' || job.error?.type === 'extension') {
+              stopReason = job.error.type === 'extension' ? job.error.message : t('listSaveAborted');
+            }
+          }
+        }
+        async function worker() {
+          while (nextIndex < items.length && !queueCancelled && !stopReason) {
+            await waitWhileQueuePaused();
+            if (queueCancelled || stopReason || nextIndex >= items.length) break;
+            await runItem(nextIndex++);
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+      } finally {
+        for (let index = 0; index < pendingTasks.length; index++) {
+          if (!started.has(index) && pendingTasks[index].downloadKind) {
+            failedTasks.push({ ...pendingTasks[index], message: stopReason || t('listQueueCancelledPending') });
+          }
+        }
+        failedTasks.sort((a, b) => a.batchIndex - b.batchIndex);
+        await checkpoint();
+        queueRunning = false;
+        operationMode = null;
+        schedulePgcAccessChecks();
+        resetQueueCancelButton();
+        updateListSelection();
+        if (checkpointKey === incompleteKey()) {
+          lastListFailures = [...failedTasks, ...retainedFailures].sort((a, b) => a.batchIndex - b.batchIndex);
+        } else {
+          if (pageCheckpointKey !== incompleteKey()) lastListFailures = [];
+          void restoreIncompleteTasks();
+        }
+        updateListRetryFailed();
+        refreshStartBtnForParallel();
+      }
+      const downgradedSuffix = downgraded ? t('listDowngradedSuffix', { count: downgraded }) : '';
+      const kindLabel = listDownloadKindLabel(queueDownloadKind);
+      if (queueCancelled) setListStatus(t('listCancelledSummary', { ok, total: items.length, kind: kindLabel }), 'error');
+      else if (stopReason) setListStatus(stopReason, 'error');
+      else if (fail || cancelled) {
+        setListStatus(t('listDoneSummary', { ok, fail, cancelled, downgraded: downgradedSuffix }), fail ? 'error' : 'success');
+      }
+      else setListStatus(t('listCompletedSummary', { ok, kind: kindLabel, downgraded: downgradedSuffix }), 'success');
+    }
+
+    function syncSpaceDownloadAllVisibility() {
+      const button = document.getElementById('bili-dl-space-download-all');
+      if (!button || !isSpacePage()) return;
+      if (isOpen) button.setAttribute('hidden', '');
+      else button.removeAttribute('hidden');
+    }
+
+    function placeMenu() {
+      const visual = window.visualViewport;
+      const width = visual?.width || document.documentElement.clientWidth || window.innerWidth;
+      const height = visual?.height || window.innerHeight;
+      const left = visual?.offsetLeft || 0;
+      const top = visual?.offsetTop || 0;
+      const margin = Math.min(16, width / 4, height / 4);
+      const menuWidth = Math.max(1, Math.min(408, width - margin * 2));
+      const menuHeight = Math.max(1, Math.min(650, height - margin * 2));
+      menu.style.width = menuWidth + 'px';
+      menu.style.maxWidth = menuWidth + 'px';
+      menu.style.left = (left + width - margin - menuWidth) + 'px';
+      menu.style.right = 'auto';
+      menu.style.top = (top + height - margin - menuHeight) + 'px';
+      menu.style.bottom = 'auto';
+      menu.style.height = menuHeight + 'px';
+      menu.style.maxHeight = menuHeight + 'px';
+    }
+
+    function openMenuShell() {
+      placeMenu();
+      menu.classList.remove('hidden');
+      menu.classList.remove('is-entering');
+      void menu.offsetWidth;
+      menu.classList.add('is-entering');
+      syncSpaceDownloadAllVisibility();
+    }
+
+    function closeMenuShell() {
+      panelOpening = null;
+      menu.classList.add('hidden');
+      menu.classList.remove('is-entering');
+      syncSpaceDownloadAllVisibility();
+    }
+    closeBtn.onclick = () => {
+      isOpen = false;
+      closeMenuShell();
+    };
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !isOpen || !menu.classList.contains('is-page')) return;
+      showHome();
+    });
+    startBtn.onclick = (event) => {
+      startDownload(event).catch((error) => {
+        const message = error?.message || String(error);
+        showStatus('error', message);
+        debugLog('下载', `启动异常：${message}`);
+      });
+    };
+    coverDownloadBtn.onclick = downloadCover;
+    queueBtn.onclick = (event) => startQueueDownload(null, event);
+    queuePauseBtn.onclick = toggleEntireQueuePause;
+    queueCancelBtn.onclick = cancelEntireQueue;
+    listQueuePauseBtn.onclick = toggleEntireQueuePause;
+    listQueueCancelBtn.onclick = cancelEntireQueue;
+    listStartBtn.onclick = (event) => startListDownload(null, event);
+    listRefreshPageBtn.onclick = () => refreshSpaceCurrentPage(false);
+    listLoadMoreBtn.onclick = () => isSpacePage() ? prepareAllSpaceUploads(listLoadMoreBtn) : loadMoreListItems();
+    listRetryFailedBtn.onclick = (event) => startListDownload(lastListFailures, event);
+    void restoreIncompleteTasks();
+    listDownloadKindEl?.querySelectorAll('[data-list-content]').forEach((input) => {
+      input.onchange = () => setListDownloadKind(Array.from(listDownloadKindEl.querySelectorAll('[data-list-content]:checked')).map((el) => el.dataset.listContent).join('+'));
+    });
+    listSelectAllBtn.onclick = () => {
+      const selectable = listItems.filter(canSelectListItem);
+      const allSelected = selectable.length > 0 && selectable.every((item) => selectedListKeys.has(listItemKey(item)));
+      if (allSelected) selectedListKeys.clear();
+      else selectable.forEach((item) => selectedListKeys.add(listItemKey(item)));
+      if (listFilter === 'selected') renderListItems();
+      else {
+        listItemsEl.querySelectorAll('input[type="checkbox"]').forEach((input) => { input.checked = selectedListKeys.has(input.dataset.listKey || input.dataset.bvid); });
+        updateListSelection();
+      }
+    };
+    listSearchEl.oninput = () => {
+      listQuery = listSearchEl.value.slice(0, 80);
+      renderListItems();
+    };
+    listSortEl.onchange = () => {
+      listSort = ['newest', 'oldest'].includes(listSortEl.value) ? listSortEl.value : 'default';
+      renderListItems();
+    };
+    listFilterEl.querySelectorAll('[data-list-filter]').forEach((button) => {
+      button.onclick = () => {
+        listFilter = button.dataset.listFilter === 'selected' ? 'selected' : 'all';
+        listFilterEl.querySelectorAll('[data-list-filter]').forEach((item) => item.classList.toggle('active', item === button));
+        renderListItems();
+      };
+    });
+    modeTabsEl.querySelectorAll('[data-mode]').forEach((button) => {
+      button.onclick = () => {
+        panelOpening = null;
+        return setDownloadMode(button.dataset.mode).catch((error) => {
+          setListStatus(t('listSwitchFailed', { error: translateUserError(error.message || error) }), 'error');
+          debugLog('列表', error.message || String(error));
+        });
+      };
+    });
+
+    formatPillsEl.querySelectorAll('.bili-dl-pill[data-format]').forEach((btn) => {
+      btn.onclick = () => setFormat(btn.dataset.format);
+    });
+    qualityStrategyEls.forEach((el) => {
+      el.onchange = () => {
+        qualityBeforeAutoDefault = null;
+        qualityStrategy = el.value === 'highest' ? 'highest' : 'exact';
+        renderQualityPills(qualities);
+        saveDownloadPrefs();
+      };
+    });
+    streamPreferenceEls.forEach((el) => {
+      el.onchange = () => {
+        streamPreference = el.value === 'compatible' ? 'compatible' : 'high-bitrate';
+        streamPreferenceEls.forEach((control) => { control.value = streamPreference; });
+        refreshEstimate();
+        saveDownloadPrefs();
+      };
+    });
+    if (EXT.storage?.onChanged) {
+      EXT.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes[THEME_PREF_KEY]) applyTheme(changes[THEME_PREF_KEY].newValue);
+        if (changes[globalThis.BiliDlI18n?.KEY]) applyLanguage();
+        const key = globalThis.BiliDlSettings?.STORAGE_KEY || 'biliDlSettings_v1';
+        if (changes[key]?.newValue) applyFilenameSettings(globalThis.BiliDlSettings.normalizeSettings(changes[key].newValue));
+      });
+    }
+    Promise.all([
+      globalThis.BiliDlI18n?.ready,
+      globalThis.BiliDlTheme?.loadThemes?.()
+    ]).then(() => {
+      applyLanguage();
+      return EXT.storage.local.get(THEME_PREF_KEY);
+    }).then((data) => applyTheme(data?.[THEME_PREF_KEY])).catch(() => {});
+    globalThis.BiliDlI18n?.onChange?.(() => applyLanguage());
+    const downloadPrefsReady = loadDownloadPrefs();
+
+    let menuResizeFrame = 0;
+    function keepMenuVisible() {
+      cancelAnimationFrame(menuResizeFrame);
+      menuResizeFrame = requestAnimationFrame(() => { if (isOpen) placeMenu(); });
+    }
+    window.addEventListener('resize', keepMenuVisible);
+    window.addEventListener('pageshow', keepMenuVisible);
+    window.visualViewport?.addEventListener('resize', keepMenuVisible);
+    window.visualViewport?.addEventListener('scroll', keepMenuVisible);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) keepMenuVisible(); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && activeMode === 'list') {
+        updatePgcAccessRows();
+        schedulePgcAccessChecks();
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      // A browser fullscreen element is rendered above normal page stacking.
+      const full = document.fullscreenElement;
+      const host = full && !/^(VIDEO|IFRAME)$/.test(full.tagName) ? full : document.documentElement;
+      if (panel.parentElement !== host && !panel.contains(host)) host.appendChild(panel);
+      keepMenuVisible();
+    });
+    async function openPanel(mode, opts = {}) {
+      const opening = !isOpen && !mode ? {} : null;
+      if (!isOpen || mode) panelOpening = opening;
+      const listAvailable = isListPage();
+      const initialMode = isOpen && !mode ? activeMode : (listAvailable && mode !== 'video' ? 'list' : 'video');
+      isOpen = true;
+      openMenuShell();
+      if (opts.onOpened) showHome();
+      modeTabsEl.classList.toggle('hidden', !listAvailable);
+      menu.classList.toggle('is-list-page', listAvailable);
+      const modeReady = setDownloadMode(initialMode, mode === 'list');
+      opts.onOpened?.();
+      await Promise.all([modeReady, loadVideoInfo(opening)]);
+      if (opts.sheet && isOpen) await openInfoSheet(opts.sheet);
+    }
+
+    window.__BILI_DL_API__ = { fetchSnapshot, openPanel };
+
+    async function prepareAllSpaceUploads(button) {
+      if (spaceGathering || queueRunning || listLoading) return;
+      const href = location.href;
+      spaceGathering = true;
+      button.disabled = true;
+      listLoaded = false;
+      updateListSelection();
+      try {
+        await window.__BILI_DL_API__.openPanel('list');
+        if (!listLoaded || href !== location.href) return;
+        // The visible upload page can be any page. Gather the complete API
+        // sequence from page one, independent of the current DOM pagination.
+        const request = captureListView();
+        const first = await agentCall('RESOLVE_LIST', { cursor: { pn: 1 } });
+        if (!isCurrentListView(request)) return;
+        await applySpaceListData(first, { pn: 1 });
+        while (listHasMore && href === location.href) {
+          if (!await loadMoreListItems()) return;
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        if (href !== location.href) return;
+        if (listItems.length !== listTotal) {
+          setListStatus(t('spaceCountChanged', { loaded: listItems.length, total: listTotal }), 'error');
+          return;
+        }
+        selectedListKeys = new Set(listItems.map(listItemKey));
+        renderListItems();
+        setListStatus(t('spaceAllSelected', { count: listItems.length }));
+      } catch (error) {
+        setListStatus(t('spaceGatherFailed', { error: translateUserError(error.message || error) }), 'error');
+      } finally {
+        spaceGathering = false;
+        button.disabled = false;
+        updateListSelection();
+        updateListLoadMore();
+      }
+    }
+
+    // Space is a SPA: reattach the entry when the native video heading is replaced.
+    function mountSpaceEntry() {
+      if (!isSpacePage()) {
+        document.getElementById('bili-dl-space-download-all')?.setAttribute('hidden', '');
+        return;
+      }
+      if (document.getElementById('bili-dl-space-download-all')) {
+        syncSpaceDownloadAllVisibility();
+        return;
+      }
+      const heading = [...document.querySelectorAll('h1,h2,h3,.section-title,.part-title,.video-title,.upload-title,.video-header .title')]
+        .find((node) => /^(?:TA的视频|TA 的视频|我的视频|视频)(?:\s*[·\-]?\s*\d+)?$/.test(node.textContent.trim()));
+      if (!heading) return;
+      const button = document.createElement('button');
+      button.id = 'bili-dl-space-download-all';
+      button.type = 'button';
+      button.title = '读取该 UP 主的全部视频投稿并打开批量下载面板';
+      button.setAttribute('aria-label', '下载该 UP 主的全部视频投稿');
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', 'M12 3v12m-5-5 5 5 5-5M5 17v4h14v-4');
+      icon.appendChild(path);
+      button.append(icon, document.createTextNode('下载全部'));
+      button.onclick = () => prepareAllSpaceUploads(button);
+      heading.appendChild(button);
+      syncSpaceDownloadAllVisibility();
+    }
+    if (location.hostname === 'space.bilibili.com') {
+      let entryTimer;
+      let pageWatchTimer;
+      lastSpaceViewKey = spaceViewKey();
+      new MutationObserver((mutations) => {
+        if (mutationTouchesExtension(mutations)) return;
+        clearTimeout(entryTimer);
+        entryTimer = setTimeout(mountSpaceEntry, 200);
+        clearTimeout(pageWatchTimer);
+        pageWatchTimer = setTimeout(() => {
+          observeSpaceView();
+          flushPendingListSync();
+        }, 250);
+      }).observe(document.body, { childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['class', 'aria-current', 'aria-selected', 'href'] });
+      mountSpaceEntry();
+    }
+
+    let lastUrl = location.href;
+
+    function onUrlChanged() {
+      if (location.href === lastUrl) return;
+      lastUrl = location.href;
+      panelOpening = null;
+      videoSourceRevision++;
+      keepMenuVisible();
+      listViewRevision++;
+      pendingListSync = true;
+      // Running jobs already own their source snapshots. Invalidate only the
+      // current page immediately, before rendering or scheduling new requests.
+      videoInfo = null;
+      selectedQn = 0;
+      resetQualityOnNavigation = true;
+      startBtn.disabled = true;
+      coverDownloadBtn.disabled = true;
+      queueBtn.disabled = true;
+      pageIndex = pageIndexFromUrl(location.href);
+      snapshotCache = null;
+      snapshotCacheKey = '';
+      listLoaded = false;
+      listItems = [];
+      listTotal = 0;
+      listCursor = null;
+      listHasMore = false;
+      selectedListKeys = new Set();
+      if (!queueRunning) { lastListFailures = []; void restoreIncompleteTasks(); }
+      renderListItems();
+      updateListLoadMore();
+      updateListRetryFailed();
+      cachedSpaceDomPage = 1;
+      cachedSpaceDomPage = readSpaceDomPageNumber();
+      lastSpaceViewKey = spaceViewKey();
+      syncSpaceListTools();
+      modeTabsEl.classList.toggle('hidden', !isListPage());
+      menu.classList.toggle('is-list-page', isListPage());
+      if (isListPage() && activeMode === 'list') setDownloadMode('list');
+      else if (!isListPage()) setDownloadMode('video');
+      // 下载中仍刷新视频信息，便于「加入队列」下一集；不打断进度条
+      if (isOpen) loadVideoInfo();
+      scheduleListSync();
+    }
+
+    // SPA 路由监听：popstate（前进/后退）+ 拦截 pushState/replaceState（站内切换）
+    window.addEventListener('popstate', onUrlChanged);
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function (...args) {
+      const ret = origPush.apply(this, args);
+      onUrlChanged();
+      return ret;
+    };
+    history.replaceState = function (...args) {
+      const ret = origReplace.apply(this, args);
+      onUrlChanged();
+      return ret;
+    };
+    // 兜底：站内其他改 URL 方式（location 直接赋值等）
+    window.addEventListener('hashchange', onUrlChanged);
+    // Content scripts have an isolated history wrapper: page-world SPA calls can
+    // bypass it, and pushState does not emit popstate. Observe the actual URL too.
+    setInterval(() => {
+      if (!document.hidden) {
+        onUrlChanged();
+        observeSpaceView();
+        flushPendingListSync();
+      }
+    }, 500);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { onUrlChanged(); observeSpaceView(); flushPendingListSync(); }
+    });
+    window.addEventListener('focus', onUrlChanged);
+
+    function autoOpenPanelSoon() {
+      setTimeout(() => {
+        openPanel().catch((error) => debugLog('面板', error.message));
+      }, 600);
+    }
+
+    try {
+      if (sessionStorage.getItem('biliDlAutoOpen')) {
+        sessionStorage.removeItem('biliDlAutoOpen');
+        autoOpenPanelSoon();
+      }
+    } catch { /* ignore */ }
+
+    // popup 历史「打开」等跨标签场景用 storage 标记
+    EXT.storage.local.get('biliDlAutoOpen').then(({ biliDlAutoOpen: flag }) => {
+      if (!flag) return;
+      EXT.storage.local.remove('biliDlAutoOpen').catch(() => {});
+      autoOpenPanelSoon();
+    }).catch(() => {});
+  }
+
+  function waitAndMount() {
+    if (document.body) mountUI();
+    else setTimeout(waitAndMount, 100);
+  }
+  waitAndMount();
+
+  EXT.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    const api = window.__BILI_DL_API__;
+    if (!api) {
+      sendResponse({ ok: false, error: '页面未就绪，请刷新后重试' });
+      return;
+    }
+    if (msg.type === 'BILI_DL_GET_INFO') {
+      api.fetchSnapshot()
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }));
+      return true;
+    }
+    if (msg.type === 'BILI_DL_OPEN_PANEL') {
+      let acknowledged = false;
+      const acknowledge = () => {
+        acknowledged = true;
+        sendResponse({ ok: true });
+      };
+      api.openPanel(msg.mode, { sheet: msg.sheet, onOpened: msg.fromToolbar ? acknowledge : undefined })
+        .then(() => { if (!acknowledged) acknowledge(); })
+        .catch((error) => {
+          if (!acknowledged) sendResponse({ ok: false, error: error.message });
+          else debugLog('面板', error.message);
+        });
+      return true;
+    }
+  });
+})();
