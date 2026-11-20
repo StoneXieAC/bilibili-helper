@@ -6,6 +6,11 @@
   'use strict';
   root.BiliDlI18n?.mergeMessages?.({
     ja: {
+      chapterMode: 'チャプターごとにダウンロード', chapterStart: '選択したチャプターをダウンロード（{count}）',
+      chapterLoading: 'チャプターを読み込み中…', chapterEmpty: 'このパートにチャプターはありません', chapterLoadFailed: 'チャプターを読み込めませんでした',
+      chapterSelectAll: 'このパートをすべて選択', chapterClear: 'このパートの選択を解除', chapterTaskFailed: ' · P{part}「{title}」：{message}',
+      chapterNoIndex: '利用できるメディアインデックスがありません', chapterNoDash: 'この画質ではチャプターに対応する DASH ストリームを利用できません',
+      chapterBadRange: 'サーバーのバイト範囲が無効です。別の画質でお試しください。', chapterBadBoundary: '音声と映像の境界を確認できませんでした',
       batchConcurrency: '一括ダウンロードの同時実行数',
       previewLabel: 'プレビュー', previewPrefix: 'プレビュー：',
       sampleTitle: 'サンプル動画タイトル', sampleAuthor: 'サンプル投稿者', samplePartTitle: 'サンプルパートタイトル',
@@ -29,6 +34,11 @@
            loading: '読み込み中', identifying: 'ページを確認中…', openPanel: 'ダウンロードパネルを開く', availableQuality: '利用可能な画質', emptyDetect: 'このページは対応していません', emptyTitle: '動画、リスト、投稿者スペース、公式エピソードに対応', emptyDesc: 'Bilibili の /video/、/list/、投稿者スペース、/bangumi/play/ を開いてください。アカウントでアクセスできるメディアのみ利用できます。', currentPage: '現在のページ: ', currentPageEmpty: '現在のページ: —', currentPageUnknown: '現在のページ: 不明', stepOpen: '対応する Bilibili の動画、リスト、投稿者スペースを開く', stepFab: 'ブラウザーのツールバーにあるダウンロードアシスタントのアイコンをクリック', stepDownload: '画質と内容を選択。バッチは同時に 1〜5 件ダウンロードできます', tagMp4: 'MP4 / M4A', tagFree: '無料', openSample: 'サンプル動画を開く', loadFailed: '読み込みに失敗しました', errorTitle: '動画情報を読み取れません', errorHint: 'Bilibili の動画ページを更新してから、拡張機能アイコンをもう一度クリックしてください', retry: '更新して再試行', history: 'ダウンロード履歴', historyClear: '履歴を消去', historyOpen: '開く', historyEmpty: 'ダウンロード履歴はありません', untitled: '無題',    disclaimer: '個人学習目的に限ります。Bilibili の利用規約を守ってください。', justNow: 'たった今', minutesAgo: '{n} 分前', hoursAgo: '{n} 時間前', daysAgo: '{n} 日前', monthsAgo: '{n} か月前', yearsAgo: '{n} 年前', japanese: '日本語', korean: '韓国語', spanish: 'スペイン語', french: 'フランス語', portuguese: 'ポルトガル語（ブラジル）', german: 'ドイツ語'
     },
     ko: {
+      chapterMode: '챕터별 다운로드', chapterStart: '선택한 챕터 다운로드({count})',
+      chapterLoading: '챕터를 불러오는 중…', chapterEmpty: '이 파트에는 챕터가 없습니다', chapterLoadFailed: '챕터를 불러오지 못했습니다',
+      chapterSelectAll: '이 파트 모두 선택', chapterClear: '이 파트 선택 해제', chapterTaskFailed: ' · P{part} “{title}”: {message}',
+      chapterNoIndex: '사용할 수 있는 미디어 인덱스가 없습니다', chapterNoDash: '이 화질에서는 챕터용 DASH 스트림을 사용할 수 없습니다',
+      chapterBadRange: '서버의 바이트 범위가 올바르지 않습니다. 다른 화질을 선택해 보세요.', chapterBadBoundary: '오디오와 영상의 경계를 확인하지 못했습니다',
       batchConcurrency: '일괄 동시 다운로드 수',
       previewLabel: '미리 보기', previewPrefix: '미리 보기: ',
       sampleTitle: '예시 동영상 제목', sampleAuthor: '예시 업로더', samplePartTitle: '예시 파트 제목',

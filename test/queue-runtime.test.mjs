@@ -10,6 +10,7 @@ function queueHarness(overrides = {}) {
     batchConcurrency: 3, queueRunning: false, pickingVideoDirectory: false, queueCancelled: false, queuePaused: false, operationMode: null,
     activeJobs: new Map(), videoInfo: { pages: [{}, {}, {}] }, location: { href: 'https://www.bilibili.com/video/BVoriginal' },
     selectedQn: 64, selectedFormat: 'mp4', streamPreference: 'high-bitrate', qualities: [],
+    chapterSelection: { enabled: false, parts: new Map() },
     filenameTemplate: '{title} - {bvid} - {quality}',
     buildFilenameBase: (info) => String(info?.title || 'video'),
     startBtn: {}, queueBtn: {}, queueLabelEl: {}, statusEl: { classList: { add() {} }, querySelector: () => null },
@@ -31,9 +32,48 @@ function queueHarness(overrides = {}) {
     ...overrides
   });
   c.removeJobCard = (id) => c.activeJobs.delete(id);
+  vm.runInContext(source.slice(source.indexOf('    function buildChapterPlan('), source.indexOf('    function snapshotKey(')), c);
   vm.runInContext(source.slice(source.indexOf('    async function prepareBatchDestination('), source.indexOf('    async function startListDownload(')), c);
   return { c, calls, states, actions };
 }
+test('chapter queue snapshots only selected ranges across parts and retries failed files', async () => {
+  const chapters = [
+    { number: 1, title: '跳过', start: 0, end: 5 },
+    { number: 2, title: '第 1–2 集', start: 5, end: 10 },
+    { number: 3, title: '第 3–4 集', start: 10, end: 15 }
+  ];
+  const parts = new Map([
+    ['111', { cid: '111', index: 0, number: 1, title: '1~16', chapters, selected: new Set([2]) }],
+    ['222', { cid: '222', index: 1, number: 2, title: '17~32', chapters, selected: new Set([3]) }]
+  ]);
+  const attempts = [], saved = [];
+  let fail = true, picks = 0;
+  const directory = {};
+  const h = queueHarness({
+    videoInfo: { title: '系列', aid: '100', bvid: 'BVoriginal' },
+    chapterSelection: { enabled: true, parts },
+    pickBatchDirectory: async () => { picks++; return directory; },
+    runSingleDownload: async (info, opts) => {
+      attempts.push([info.cid, opts.chapter.number, opts.chapter.start, opts.chapter.end, opts.qn]);
+      assert.equal(opts.directory, directory);
+      if (info.cid === '222' && fail) throw new Error('保存失败');
+      return {};
+    },
+    addHistory: async (entry) => saved.push(entry.title)
+  });
+  await h.c.startQueueDownload();
+  assert.equal(picks, 1);
+  assert.deepEqual(attempts, [['111', 2, 5, 10, 64], ['222', 3, 10, 15, 64]]);
+  assert.equal(h.calls.length, 0);
+  h.c.videoInfo = null;
+  h.c.selectedQn = 120;
+  parts.clear();
+  fail = false;
+  await h.actions[0].onclick();
+  assert.equal(picks, 2);
+  assert.deepEqual(attempts.at(-1), ['222', 3, 10, 15, 64]);
+  assert.deepEqual(saved, ['系列 - P1 · 第 1–2 集', '系列 - P2 · 第 3–4 集']);
+});
 test('queue runs in parallel and snapshots origin before SPA navigation', async () => {
   let active = 0, max = 0;
   const h = queueHarness({ runSingleDownload: async () => {

@@ -19,7 +19,7 @@
 
 | 方向 | 消息 |
 | --- | --- |
-| 内容脚本 → 页面代理（`bili-dl-panel`） | `PARSE_URL`、`RESOLVE_VIDEO`、`RESOLVE_LIST`、`SPACE_COLLECTIONS`、`LOAD_LIST_PAGE`、`CHECK_PGC_ACCESS`、`GET_QUALITIES`、`GET_ESTIMATE`、`START_DOWNLOAD` |
+| 内容脚本 → 页面代理（`bili-dl-panel`） | `PARSE_URL`、`RESOLVE_VIDEO`、`RESOLVE_LIST`、`SPACE_COLLECTIONS`、`LOAD_LIST_PAGE`、`CHECK_PGC_ACCESS`、`GET_QUALITIES`、`GET_ESTIMATE`、`GET_CHAPTERS`、`START_DOWNLOAD`、`START_CHAPTER_DOWNLOAD` |
 | 页面代理 → 内容脚本（`bili-dl-agent`） | `OK`（`data`）或 `ERR`（`error`）回传请求 `id`，另有 `LOG` 和 `PROGRESS` 事件 |
 | 任务控制 | 内容脚本通过 `agentSignal` 发送 `PAUSE_DOWNLOAD`、`RESUME_DOWNLOAD` 或 `CANCEL_DOWNLOAD`，按 `jobId` 定位，无请求回复 |
 | 合成调度 | 页面代理发送 `MERGE_REQUEST` 或 `MERGE_CANCEL`，内容脚本以 `MERGE_RESULT` 回传 Blob 或错误。三种消息都按 `jobId` 匹配 |
@@ -29,6 +29,7 @@
 - `START_DOWNLOAD` 成功返回媒体 Blob、文件名和任务标识。DASH 合成在需要时可附带已下载的音轨，供同一任务保存 M4A。按任务区分媒体请求、合成和磁盘保存的失败，避免把失败标为完成。
 - Chromium 单视频和批量任务都由内容脚本在受信任点击中取得目录句柄，再发起下载并写入文件。批量封面经后台白名单读取，以文档隔离的 `requestId` 关联 `BILI_DL_DOWNLOAD_COVER` 与 `BILI_DL_CANCEL_COVER`；后台对整个读取设置 30 秒上限，内容脚本取消时中断等待并通知后台终止请求，35 秒兜底避免后台无响应锁住队列。每项文件写入提交后才释放该任务的并发名额，同目录写入串行分配并提交文件名。后台的浏览器下载及状态消息仍用于原生保存流程。
 - 区分同一 BV 的分 P、视频页合集、`/list/`、UP 主空间及官方剧集。列表选择和队列需要保留条目标识与分 P；任务入队时固定当前来源、选择、文件名模板和批量并发数（1–5，默认 3）。批量 `batchIndex` 按本次选中任务排列从 1 固定，命名追加 `_pN`，重试与清晰度调整均须保留；它与实际分 P 的 `part` 不同。未完成任务检查点按队列串行写入。处理取消、失败、重试和站内切页时，释放任务状态及资源。
+- 普通视频的章节选择按投稿保留在页面内存。开启后对各 P 调用 `GET_CHAPTERS`。章节任务复用分 P 队列，快照固定 `cid`、编号、标题与起止秒数。页面代理用严格的有界 Range 请求初始化段、`sidx` 和所需片段，换源时重新读取对应索引。Worker 按轨道时间基准重建 MP4 样本表和编辑列表。章节分支失败会报告原因。
 
 ## 下载防休眠
 
@@ -42,7 +43,7 @@
 - 运行脚本沿用原生 JavaScript、现有 IIFE 和两空格缩进等局部风格。复用现有函数和消息封装。CSS 沿用组件选择器范围及共享主题变量，避免污染 B 站页面。局部调整随组件修改，共用样式见 [design-system.css](../shared/design-system.css) 和 [ambient-themes.css](../shared/ambient-themes.css)。
 - `filename.js` 在 `download-settings.js` 前加载，供后者规范化模板、兼容旧文件名偏好。保留旧存储键的迁移路径。Popup 的设置入口复用面板交互。
 - 面板与 popup 均先加载 `theme-manager.js`，再依次加载 `i18n-languages.js`、`i18n.js`、`i18n-extra.js`、`i18n-ja-ko.js`，最后加载对应入口脚本。页面和弹窗文案使用 `BiliDlI18n` 的翻译键，扩展名称及描述使用 [_locales](../_locales/) 中的 `extName` / `extDesc`，默认语言为 `zh_CN`。
-- Blob Worker 按 `mp4-remux.iife.js`、`m4s-mux.js`、`m4s-mux-worker.js` 的顺序拼接已打包脚本。保留 Worker 取消、媒体完整性检查和大任务互斥。Worker 不可用时，符合条件的小任务走页面外链脚本的兼容路径。维护第三方库时核对 [mp4-remux 上游](https://github.com/mscststs/mp4-remux) 的 MIT 许可及 [test 依赖锁文件](../test/package-lock.json)，同步更新本地副本并验证 Worker 和实际合成。
+- Blob Worker 依次加载 `mp4-remux.iife.js`、`m4s-mux.js`、`chapter-mp4.js`、`m4s-mux-worker.js`。页面代理也在 MAIN world 加载 `chapter-mp4.js`，用于读取章节对应的媒体索引。保留 Worker 取消、媒体完整性检查和大任务互斥。Worker 不可用时，符合条件的普通小文件下载走页面外链脚本的兼容路径。维护第三方库时核对 [mp4-remux 上游](https://github.com/mscststs/mp4-remux) 的 MIT 许可及 [test 依赖锁文件](../test/package-lock.json)，同步更新本地副本并验证 Worker 和实际合成。
 - 新增运行资源时核对 [manifest](../manifest.json) 的注入顺序、权限和页面可访问资源、[popup HTML](../popup/popup.html) 的引用，以及 [Chromium 打包脚本](../scripts/pack.py) 的 `INCLUDE` 清单。
 
 ## 权限与隐私

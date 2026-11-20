@@ -14,7 +14,7 @@ INCLUDE = {
     'shared/themes-ambient-full.json', 'shared/i18n-languages.js', 'shared/i18n.js', 'shared/i18n-extra.js', 'shared/i18n-ja-ko.js', 'shared/filename.js', 'shared/download-settings.js',
     'shared/download-power.js',
     'popup/popup.html', 'popup/popup.js', 'popup/popup.css',
-    'lib/mp4-remux.iife.js', 'lib/m4s-mux.js', 'lib/m4s-mux-worker.js',
+    'lib/mp4-remux.iife.js', 'lib/m4s-mux.js', 'lib/m4s-mux-worker.js', 'lib/chapter-mp4.js',
     'icons/icon128.png', 'icons/icon48.png', 'icons/icon32.png', 'icons/icon16.png',
 }
 

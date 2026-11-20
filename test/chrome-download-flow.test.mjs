@@ -192,7 +192,7 @@ function panelHarness(pathname, snapshot) {
     openMenuShell() {}, showHome() {}, syncSpaceDownloadAllVisibility() {},
     syncQualitySelection() {}, refreshEstimate() {}, updatePgcAccessRows() {}, schedulePgcAccessChecks() {},
     setDetect() {}, setVideoLoading() {}, clearNode() {}, appendTextElement() {},
-    renderQualityPills() {}, refreshStartBtnForQueue() {}, debugLog() {},
+    renderQualityPills() {}, refreshStartBtnForQueue() {}, syncChapterUi() {}, debugLog() {},
     showDownloadError: (message) => assert.fail(message), translateUserError: (message) => message
   });
   for (const name of ['menu', 'modeTabsEl', 'homeEl', 'videoBodyEl', 'listBodyEl', 'titleEl',

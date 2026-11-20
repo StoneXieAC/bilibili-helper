@@ -889,6 +889,19 @@
 .bili-dl-stream-preference-row select { max-width: 210px; padding: 5px 8px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); background: var(--bdl-surface); color: var(--bdl-text); font: inherit; font-size: 11px; }
 .bili-dl-filename-preview { display: flex; align-items: baseline; gap: 4px; min-width: 0; margin: 0 0 8px; color: var(--bdl-text-muted); font-size: 11px; line-height: 1.4; white-space: nowrap; }
 .bili-dl-filename-preview-label { flex: 0 0 auto; color: var(--bdl-text-muted); }
+
+.bili-dl-chapters { margin: 0 0 10px; font-size: 12px; }
+.bili-dl-chapter-toggle,
+.bili-dl-chapter-item { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.bili-dl-chapters input { flex: 0 0 auto; margin: 0; accent-color: var(--bdl-accent); }
+.bili-dl-chapter-parts { display: grid; gap: 8px; max-height: min(250px, 36vh); overflow: auto; margin-top: 8px; }
+.bili-dl-chapter-part { min-width: 0; margin: 0; padding: 6px 8px; border: 1px solid var(--bdl-border); border-radius: var(--bdl-radius); }
+.bili-dl-chapter-part legend { max-width: 100%; padding: 0 4px; overflow-wrap: anywhere; }
+.bili-dl-chapter-actions { display: flex; gap: 8px; margin-bottom: 4px; }
+.bili-dl-chapter-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 4px 0; }
+.bili-dl-chapter-item span { overflow-wrap: anywhere; }
+.bili-dl-chapter-item small { grid-column: 2; color: var(--bdl-text-muted); font-variant-numeric: tabular-nums; }
+.bili-dl-chapter-status { padding: 4px 0; color: var(--bdl-text-muted); }
 .bili-dl-filename-preview-name { min-width: 0; overflow: hidden; color: var(--text-secondary, #52525b); font-weight: 500; text-overflow: ellipsis; }
 /* 高级选项仍保留已保存的默认行为，常用下载面板不展示，避免打断主流程。 */
 .bili-dl-quality-strategy-row,

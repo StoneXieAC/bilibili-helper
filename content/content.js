@@ -58,6 +58,10 @@
       '不允许的封面地址': 'bgErrCoverNotAllowed',
       '封面下载失败': 'bgErrCoverFailed',
       '无法读取该投稿的视频信息': 'readPostFailed',
+      '片源没有可用的章节媒体索引': 'chapterNoIndex',
+      '所选清晰度没有可用于章节下载的 DASH 片源': 'chapterNoDash',
+      '片源未返回有效的章节字节范围，请切换清晰度后重试': 'chapterBadRange',
+      '无法验证章节的音视频边界': 'chapterBadBoundary',
       '页面未就绪': 'pageNotReady'
     };
     if (exact[s]) return t(exact[s]);
@@ -148,7 +152,7 @@
   function loadMergeWorkerSource() {
     if (!mergeWorkerSourcePromise) {
       mergeWorkerSourcePromise = Promise.all([
-        'lib/mp4-remux.iife.js', 'lib/m4s-mux.js', 'lib/m4s-mux-worker.js'
+        'lib/mp4-remux.iife.js', 'lib/m4s-mux.js', 'lib/chapter-mp4.js', 'lib/m4s-mux-worker.js'
       ].map(async (path) => {
         const response = await fetch(EXT.runtime.getURL(path));
         if (!response.ok) throw new Error('合成组件读取失败: ' + path);
@@ -232,7 +236,7 @@
         clearTimeout(job.startTimer);
         armStallWatchdog();
         try {
-          worker.postMessage({ type: 'MERGE', jobId: job.jobId, videoBlob: job.videoBlob, audioBlob: job.audioBlob });
+          worker.postMessage({ type: 'MERGE', jobId: job.jobId, videoBlob: job.videoBlob, audioBlob: job.audioBlob, chapter: job.chapter });
           // 发送给 Worker 后不再保留页面侧引用，降低内容脚本的峰值内存。
           job.videoBlob = null;
           job.audioBlob = null;
@@ -283,6 +287,7 @@
       jobId,
       videoBlob: data.videoBlob,
       audioBlob: data.audioBlob,
+      chapter: data.chapter,
       totalBytes: Number(data.videoBlob.size) + Number(data.audioBlob.size),
       worker: null,
       ready: false,
@@ -743,6 +748,10 @@
               <span id="bili-dl-estimate-text" data-i18n="estimateEmpty">预计大小 —</span>
             </div>
 
+            <section id="bili-dl-chapters" class="bili-dl-chapters hidden">
+              <label class="bili-dl-chapter-toggle"><input id="bili-dl-chapter-enabled" type="checkbox" aria-controls="bili-dl-chapter-parts"><span data-i18n="chapterMode">按章节下载</span></label>
+              <div id="bili-dl-chapter-parts" class="bili-dl-chapter-parts hidden"></div>
+            </section>
             <button id="bili-dl-start" class="bili-dl-btn" disabled>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
               <span data-i18n="startDownload">开始下载</span>
@@ -918,6 +927,10 @@
     let estimateRequestId = 0;
     let currentEstimateBytes = 0;
     const startBtn = panel.querySelector('#bili-dl-start');
+    const chapterSection = panel.querySelector('#bili-dl-chapters');
+    const chapterToggle = panel.querySelector('#bili-dl-chapter-enabled');
+    const chapterPartsEl = panel.querySelector('#bili-dl-chapter-parts');
+    let chapterSelection = { enabled: false, parts: new Map(), activeRequests: 0 };
     const coverDownloadBtn = panel.querySelector('#bili-dl-download-cover');
     const queueBtn = panel.querySelector('#bili-dl-queue-all');
     const queuePauseBtn = panel.querySelector('#bili-dl-queue-pause');
@@ -1497,6 +1510,10 @@
       const root = document.getElementById('bili-dl-panel');
       globalThis.BiliDlI18n?.apply(root);
       refreshDynamicUi();
+      if (chapterSelection.enabled) {
+        chapterPartsEl.replaceChildren();
+        syncChapterUi();
+      }
     }
 
     function renderInfoSheet(key) {
@@ -1643,6 +1660,10 @@
 
     function setFormat(fmt, persist = true) {
       selectedFormat = fmt;
+      if (fmt === 'm4a' && chapterSelection.enabled) {
+        chapterSelection.enabled = false;
+        syncChapterUi();
+      }
       formatPillsEl.querySelectorAll('.bili-dl-pill[data-format]').forEach((b) => {
         b.classList.toggle('active', b.dataset.format === fmt);
       });
@@ -1669,6 +1690,7 @@
       qualityStrategy = 'exact';
       syncQualityStrategy();
       syncQualitySelection();
+      if (chapterSelection.enabled) refreshStartBtnForParallel();
       refreshEstimate();
       refreshFilenamePreview();
       saveDownloadPrefs();
@@ -2422,7 +2444,7 @@
     async function refreshEstimate() {
       const requestId = ++estimateRequestId;
       currentEstimateBytes = 0;
-      if (activeMode === 'list') {
+      if (activeMode === 'list' || chapterSelection.enabled) {
         estimateEl.classList.add('hidden');
         return;
       }
@@ -2561,7 +2583,7 @@
       }
       if (/登录|权限|会员|大会员/.test(message)) return { type: 'permission', message };
       if (/清晰度|可下载/.test(message)) return { type: 'quality', message };
-      if (/合成|合并|mux|remux/i.test(message)) return { type: 'merge', message };
+      if (/合成|合并|mux|remux|章节的音视频边界|章节媒体索引/i.test(message)) return { type: 'merge', message };
       if (/保存|download/i.test(message)) return { type: 'save', message };
       return { type: 'network', message };
     }
@@ -2952,6 +2974,135 @@
     let snapshotCacheKey = '';
     const SNAPSHOT_TTL = 10000;
 
+    function chapterVideoPath(href) {
+      return /^\/video\/(?:BV[a-zA-Z0-9]+|av\d+)\/?$/i.exec(new URL(href).pathname)?.[0].replace(/\/$/, '') || '';
+    }
+
+    function chapterTime(seconds) {
+      const milliseconds = Math.round(seconds * 1000);
+      const time = Math.floor(milliseconds / 1000);
+      const fields = [Math.floor(time / 3600), Math.floor(time / 60) % 60, time % 60];
+      const fraction = milliseconds % 1000;
+      return fields.map((value) => String(value).padStart(2, '0')).join(':') +
+        (fraction ? '.' + String(fraction).padStart(3, '0').replace(/0+$/, '') : '');
+    }
+
+    function renderChapterPart(part) {
+      const group = part.group;
+      group.replaceChildren();
+      appendTextElement(group, 'legend', '', part.title ? `P${part.number} · ${part.title}` : `P${part.number}`);
+      if (part.status !== 'ready' || !part.chapters.length) {
+        const key = { error: 'chapterLoadFailed', ready: 'chapterEmpty' }[part.status] || 'chapterLoading';
+        const status = appendTextElement(group, 'div', 'bili-dl-chapter-status', t(key));
+        status.setAttribute('role', 'status');
+        if (part.status === 'error') {
+          const retry = appendTextElement(group, 'button', 'bili-dl-action-btn', t('retryTask'));
+          retry.type = 'button';
+          retry.onclick = () => { part.status = 'pending'; renderChapterPart(part); pumpChapterRequests(); };
+        }
+        return;
+      }
+      const tools = appendTextElement(group, 'div', 'bili-dl-chapter-actions', '');
+      const all = appendTextElement(tools, 'button', 'bili-dl-action-btn', t('chapterSelectAll'));
+      const clear = appendTextElement(tools, 'button', 'bili-dl-action-btn', t('chapterClear'));
+      all.type = clear.type = 'button';
+      const inputs = part.chapters.map((chapter) => {
+        const row = appendTextElement(group, 'label', 'bili-dl-chapter-item', '');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = part.selected.has(chapter.number);
+        row.appendChild(input);
+        appendTextElement(row, 'span', '', chapter.title);
+        appendTextElement(row, 'small', '', `${chapterTime(chapter.start)} – ${chapterTime(chapter.end)}`);
+        input.onchange = () => {
+          if (input.checked) part.selected.add(chapter.number);
+          else part.selected.delete(chapter.number);
+          refreshStartBtnForParallel();
+        };
+        return input;
+      });
+      const select = (checked) => {
+        part.selected = new Set(checked ? part.chapters.map((chapter) => chapter.number) : []);
+        inputs.forEach((input) => { input.checked = checked; });
+        refreshStartBtnForParallel();
+      };
+      all.onclick = () => select(true);
+      clear.onclick = () => select(false);
+    }
+
+    function pumpChapterRequests() {
+      const state = chapterSelection;
+      if (!state.enabled || !videoInfo || state.path !== chapterVideoPath(location.href)) return;
+      for (const part of state.parts.values()) {
+        if (state.activeRequests >= 2) break;
+        if (part.status !== 'pending') continue;
+        part.status = 'loading';
+        state.activeRequests++;
+        agentCall('GET_CHAPTERS', { aid: state.aid, cid: part.cid, duration: part.duration }, 45000).then(({ chapters }) => {
+          part.chapters = chapters;
+          part.status = 'ready';
+        }).catch(() => { part.status = 'error'; }).finally(() => {
+          state.activeRequests--;
+          if (chapterSelection !== state) return;
+          renderChapterPart(part);
+          pumpChapterRequests();
+        });
+      }
+    }
+
+    function syncChapterUi() {
+      const path = chapterVideoPath(location.href);
+      const available = Boolean(path && videoInfo?.aid && videoInfo?.cid && !videoInfo.epId);
+      const state = chapterSelection;
+      if (available) {
+        state.path = path;
+        state.aid = videoInfo.aid;
+      }
+      chapterSection.classList.toggle('hidden', !available);
+      chapterToggle.checked = available && state.enabled;
+      chapterPartsEl.classList.toggle('hidden', !chapterToggle.checked);
+      filenamePreviewEl.classList.toggle('hidden', chapterToggle.checked);
+      if (!chapterToggle.checked) return;
+      const pages = videoInfo.pages?.length ? videoInfo.pages : [{ cid: videoInfo.cid, duration: videoInfo.duration }];
+      pages.forEach((page, index) => {
+        const cid = String(page.cid || '');
+        if (!cid) return;
+        if (!state.parts.has(cid)) {
+          const group = document.createElement('fieldset');
+          group.className = 'bili-dl-chapter-part';
+          state.parts.set(cid, { cid, group, index, number: page.page || index + 1, title: page.part,
+            duration: page.duration, status: 'pending', selected: new Set(), chapters: [] });
+        }
+        const part = state.parts.get(cid);
+        if (!chapterPartsEl.contains(part.group)) {
+          chapterPartsEl.appendChild(part.group);
+          renderChapterPart(part);
+        }
+      });
+      pumpChapterRequests();
+    }
+
+    function buildChapterPlan() {
+      const label = getSelectedQualityLabel();
+      const createdAt = Date.now();
+      const plan = [];
+      for (const part of chapterSelection.parts.values()) {
+        for (const chapter of part.chapters) {
+          if (!part.selected.has(chapter.number)) continue;
+          const info = {
+            bvid: videoInfo.bvid, aid: videoInfo.aid, cid: part.cid, author: videoInfo.author,
+            title: videoInfo.archiveTitle || videoInfo.title, partTitle: part.title
+          };
+          plan.push({
+            info, chapter: { ...chapter }, index: part.index, part: part.number, partTitle: part.title,
+            batchIndex: plan.length + 1, format: 'mp4', qn: selectedQn, mode: 'dash', streamPreference,
+            filenameTemplate, createdAt, label
+          });
+        }
+      }
+      return plan;
+    }
+
     function snapshotKey() {
       return `${location.href}#p=${pageIndex}`;
     }
@@ -3210,6 +3361,7 @@
         if (snap.qualities.some((q) => q.mode === 'dash')) {
           setupMuxInPage().catch(() => {});
         }
+        syncChapterUi();
         refreshStartBtnForQueue();
 
         debugLog('加载', `${videoInfo.aid}/${videoInfo.cid} · ${snap.qualities.map((q) => q.label).join(', ')}`);
@@ -3250,6 +3402,7 @@
             qualityLabel,
             index: opts.index != null ? opts.index : 1,
             batchIndex: opts.batchIndex,
+            chapter: opts.chapter,
             createdAt: opts.createdAt || Date.now()
           });
         } catch {
@@ -3257,7 +3410,7 @@
         }
       }
       const title = String(info?.title || 'bilibili-video').replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').trim() || 'bilibili-video';
-      if (Filename?.renderTemplate) return Filename.renderTemplate('{title}', { title }, { format, batchIndex: opts.batchIndex });
+      if (Filename?.renderTemplate) return Filename.renderTemplate('{title}', { title, part: meta.part }, { format, batchIndex: opts.batchIndex, chapter: opts.chapter });
       return Array.from(title).slice(0, 60).join('').replace(/[. ]+$/g, '') || 'bilibili-video';
     }
 
@@ -3336,6 +3489,9 @@
 
     function canStartCurrentDownload() {
       if (!videoInfo) return false;
+      if (chapterSelection.enabled) {
+        return Boolean(selectedQn && [...chapterSelection.parts.values()].some((part) => part.selected.size));
+      }
       if (selectedFormat === 'm4a') return true;
       return !!selectedQn;
     }
@@ -3343,6 +3499,14 @@
     function refreshStartBtnForParallel() {
       if (queueRunning) return;
       const n = activeJobs.size;
+      if (chapterSelection.enabled) {
+        const count = [...chapterSelection.parts.values()].reduce((sum, part) => sum + part.selected.size, 0);
+        startBtn.disabled = pickingVideoDirectory || n > 0 || !canStartCurrentDownload();
+        startBtn.textContent = t('chapterStart', { count });
+        queueBtn.classList.add('hidden');
+        return;
+      }
+      if (videoInfo) queueBtn.classList.toggle('hidden', !isMultiPartVideo(videoInfo.pages));
       const largeRunning = [...activeJobs.values()].some((job) => isLargeMerge(job));
       startBtn.disabled = pickingVideoDirectory || !canStartCurrentDownload() || largeRunning;
       if (n > 0) {
@@ -3393,6 +3557,7 @@
           createdAt: opts.createdAt || job?.createdAt,
           index: opts.index != null ? opts.index : (job?.index != null ? job.index : 1),
           batchIndex: opts.batchIndex ?? job?.batchIndex,
+          chapter: opts.chapter,
           pageIndex: opts.pageIndex != null ? opts.pageIndex : job?.pageIndex,
           part: opts.part != null ? opts.part : job?.part,
           partTitle: opts.partTitle || job?.partTitle || info?.partTitle,
@@ -3418,9 +3583,9 @@
 
       // Every video entry point (single, multi-P and collection/space batches)
       // can resolve to DASH even when its quality metadata originally said durl.
-      await setupMuxInPage();
+      if (!opts.chapter) await setupMuxInPage();
       if (shouldCancel()) throw new Error('下载已取消');
-      const result = await agentCall('START_DOWNLOAD', {
+      const result = await agentCall(opts.chapter ? 'START_CHAPTER_DOWNLOAD' : 'START_DOWNLOAD', {
         aid: info.aid,
         cid: info.cid,
         epId: info.epId,
@@ -3429,8 +3594,10 @@
         title: info.title,
         filenameBase,
         includeAudioBlob: opts.reuseAudio === true,
+        chapter: opts.chapter,
         jobId
       }, 0);
+      if (opts.chapter) result.filename = filenameBase + '.mp4';
 
       if (Number(result.actualQn) > 0 && Number(result.actualQn) !== Number(qn)) {
         const actualLabel = result.actualLabel || `${result.actualQn}P`;
@@ -3439,6 +3606,7 @@
           createdAt: opts.createdAt || job?.createdAt,
           index: opts.index ?? job?.index ?? 1,
           batchIndex: opts.batchIndex ?? job?.batchIndex,
+          chapter: opts.chapter,
           pageIndex: opts.pageIndex ?? job?.pageIndex,
           part: opts.part ?? job?.part,
           partTitle: opts.partTitle || job?.partTitle || info.partTitle,
@@ -3738,9 +3906,10 @@
     async function startQueueDownload(retryPlan = null, event) {
       if (queueRunning || pickingVideoDirectory || activeJobs.size) return;
       const isRetry = Array.isArray(retryPlan);
-      if (!isRetry && (!canStartCurrentDownload() || !isMultiPartVideo(videoInfo.pages))) return;
+      const chapters = isRetry ? Boolean(retryPlan[0]?.chapter) : chapterSelection.enabled;
+      if (!isRetry && (!canStartCurrentDownload() || (!chapters && !isMultiPartVideo(videoInfo.pages)))) return;
       const concurrency = batchConcurrency;
-      const plan = isRetry ? retryPlan.map((item) => ({ ...item })) : videoInfo.pages.map((_part, index) => {
+      const plan = isRetry ? retryPlan.map((item) => ({ ...item })) : chapters ? buildChapterPlan() : videoInfo.pages.map((_part, index) => {
         const createdAt = Date.now();
         const partMeta = videoInfo.pages[index] || {};
         const label = selectedFormat === 'm4a' ? '音频' : getSelectedQualityLabel();
@@ -3793,18 +3962,19 @@
       operationMode = 'video';
       startBtn.disabled = true;
       queueBtn.disabled = true;
-      queueLabelEl.textContent = t('queueAutoParts');
+      if (!chapters) queueLabelEl.textContent = t('queueAutoParts');
       statusEl.classList.add('hidden');
       syncJobListVisibility();
       let ok = 0, cancelled = 0, errors = 0, nextIndex = 0;
       const failed = [];
       try {
-        if (!(await ensureMuxReady())) return;
+        if (!chapters && !(await ensureMuxReady())) return;
         async function runOnePart(entry) {
+          const chapterTitle = entry.chapter ? `P${entry.part} · ${entry.chapter.title}` : '';
           const job = createDownloadTask({
             scope: 'video', format: entry.format, qn: entry.qn, mode: entry.mode,
             pageIndex: entry.index, label: `P${entry.index + 1} · ${entry.label}`,
-            info: { title: `P${entry.index + 1}` },
+            info: { title: chapterTitle || `P${entry.index + 1}` },
             filenameTemplate: entry.filenameTemplate,
             filenameBase: entry.filenameBase,
             createdAt: entry.createdAt,
@@ -3826,12 +3996,12 @@
               await check();
               try {
                 updateProgress('prepare', 0, 0, 0, job.jobId);
-                const result = await agentCall('RESOLVE_VIDEO', { href: entry.href, pageIndex: entry.index });
+                const info = entry.info || (await agentCall('RESOLVE_VIDEO', { href: entry.href, pageIndex: entry.index })).info;
                 await check();
-                job.info = result.info;
+                job.info = chapterTitle ? { ...info, title: chapterTitle } : info;
                 const title = job.cardEl?.querySelector('.bili-dl-progress-title');
                 if (title) { title.textContent = job.info.title; title.title = job.info.title; }
-                const savedResult = await runSingleDownload(job.info, {
+                const savedResult = await runSingleDownload(info, {
                   qn: entry.qn,
                   format: entry.format,
                   streamPreference: entry.streamPreference,
@@ -3845,12 +4015,14 @@
                   pageIndex: entry.index,
                   part: entry.part,
                   partTitle: entry.partTitle || job.info?.partTitle,
-                  qualityLabel: entry.label
+                  qualityLabel: entry.label,
+                  chapter: entry.chapter
                 });
                 ok++;
                 setTaskState(job, TASK_STATE.completed);
                 await addHistory({ bvid: job.info.bvid, epId: job.info.epId, aid: job.info.aid, cid: job.info.cid,
-                  pageIndex: entry.index, title: job.info.title, label: savedResult.actualLabel || entry.label, format: entry.format, downloadId: savedResult.downloadId, ts: Date.now() })
+                  pageIndex: entry.index, title: chapterTitle ? `${info.title} - ${chapterTitle}` : info.title,
+                  label: savedResult.actualLabel || entry.label, format: entry.format, downloadId: savedResult.downloadId, ts: Date.now() })
                   .catch((error) => debugLog('历史', '分 P 已保存，历史记录写入失败：' + error.message));
                 return;
               } catch (error) {
@@ -3906,8 +4078,14 @@
           fail: errors,
           cancelled: cancelled ? t('queueSummaryCancelled', { count: cancelled }) : ''
         });
+        const firstFailure = failed[0];
+        const failureDetail = firstFailure ? t(chapters ? 'chapterTaskFailed' : 'queuePartFailed', {
+          part: firstFailure.part || firstFailure.index + 1,
+          title: firstFailure.chapter?.title,
+          message: translateUserError(firstFailure.message)
+        }) : '';
         showStatus(failed.length || queueCancelled ? 'error' : 'success',
-          `${queueCancelled ? t('queueCancelledTitle') : t('queueFinishedTitle')}：${counts}${failed.length ? t('queuePartFailed', { part: failed[0].index + 1, message: translateUserError(failed[0].message) }) : ''}`, !directory);
+          `${queueCancelled ? t('queueCancelledTitle') : t('queueFinishedTitle')}：${counts}${failureDetail}`, !directory);
         if (failed.length) {
           const retry = appendTextElement(statusEl, 'button', 'bili-dl-status-action', t('queueRetryFailedOnly', { count: failed.length }));
           retry.type = 'button';
@@ -4293,8 +4471,17 @@
       if (event.key !== 'Escape' || !isOpen || !menu.classList.contains('is-page')) return;
       showHome();
     });
+    chapterToggle.onchange = () => {
+      if (!videoInfo) return;
+      chapterSelection.enabled = chapterToggle.checked;
+      if (chapterToggle.checked) setFormat('mp4', false);
+      syncChapterUi();
+      refreshStartBtnForParallel();
+      refreshEstimate();
+    };
     startBtn.onclick = (event) => {
-      startDownload(event).catch((error) => {
+      const download = chapterSelection.enabled ? startQueueDownload(null, event) : startDownload(event);
+      download.catch((error) => {
         const message = error?.message || String(error);
         showStatus('error', message);
         debugLog('下载', `启动异常：${message}`);
@@ -4518,6 +4705,10 @@
 
     function onUrlChanged() {
       if (location.href === lastUrl) return;
+      if (chapterVideoPath(lastUrl) !== chapterVideoPath(location.href)) {
+        chapterSelection = { enabled: false, parts: new Map(), activeRequests: 0 };
+        chapterPartsEl.replaceChildren();
+      }
       lastUrl = location.href;
       panelOpening = null;
       videoSourceRevision++;
@@ -4527,6 +4718,7 @@
       // Running jobs already own their source snapshots. Invalidate only the
       // current page immediately, before rendering or scheduling new requests.
       videoInfo = null;
+      syncChapterUi();
       selectedQn = 0;
       resetQualityOnNavigation = true;
       startBtn.disabled = true;

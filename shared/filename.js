@@ -121,9 +121,12 @@
     const check = validateTemplate(template);
     if (!check.ok) throw new Error(check.error);
     const batchIndex = opts?.batchIndex;
-    const suffix = Number.isSafeInteger(batchIndex) && batchIndex > 0 ? `_p${batchIndex}` : '';
-    const basenameChars = MAX_BASENAME - suffix.length;
-    const basenameBytes = MAX_BASENAME_BYTES - suffix.length;
+    const chapter = opts?.chapter;
+    const batchSuffix = Number.isSafeInteger(batchIndex) && batchIndex > 0 ? `_p${batchIndex}` : '';
+    const chapterLabel = chapter ? fitPrefix(sanitizeSegment(chapter.title, ''), 36, 72).trim().replace(/[. ]+$/g, '') : '';
+    const suffix = chapter ? ` - P${pad2(meta?.part)}-${pad2(chapter.number)}${chapterLabel ? ' ' + chapterLabel : ''}` : batchSuffix;
+    const basenameChars = MAX_BASENAME - Array.from(suffix).length;
+    const basenameBytes = MAX_BASENAME_BYTES - utf8.encode(suffix).length;
     const values = buildValues(meta, opts);
     // Reserve room for identifiers and quality before shortening free-form text.
     // A long title must not consume the suffix of a configured template.

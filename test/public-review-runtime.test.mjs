@@ -148,6 +148,9 @@ test('SPA navigation invalidates current metadata while preserving active job sn
   const c = vm.createContext({
     URL, location: { href: 'https://www.bilibili.com/video/BVnew?p=2' },
     lastUrl: 'https://www.bilibili.com/video/BVold', videoInfo: old,
+    chapterSelection: { enabled: true, parts: new Map([[1, {}]]) },
+    chapterPartsEl: { replaceChildren() {} },
+    syncChapterUi() {},
     downloading: true, queueRunning: false, selectedQn: 80, isOpen: false, activeMode: 'video',
     videoSourceRevision: 0, listViewRevision: 0, collectionHref: '',
     keepMenuVisible() {}, renderListItems() {}, updateListLoadMore() {}, updateListRetryFailed() {},
@@ -157,11 +160,14 @@ test('SPA navigation invalidates current metadata while preserving active job sn
     startBtn: {}, coverDownloadBtn: {}, queueBtn: {}
   });
   if (content.includes('  function pageIndexFromUrl(')) load(c, '  function pageIndexFromUrl(', '  let pageIndex =');
+  load(c, '    function chapterVideoPath(', '    function chapterTime(');
   load(c, '    function onUrlChanged()', '    // SPA 路由监听');
   c.onUrlChanged();
   assert.equal(c.videoInfo, null);
   assert.equal(c.pageIndex, 1);
   assert.equal(c.startBtn.disabled, true);
+  assert.equal(c.chapterSelection.enabled, false);
+  assert.equal(c.chapterSelection.parts.size, 0);
   assert.equal(c.coverDownloadBtn.disabled, true);
   assert.equal(old.bvid, 'BVold');
 });

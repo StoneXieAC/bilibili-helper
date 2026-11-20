@@ -13,11 +13,12 @@ test('packaged Blob worker boots without relative imports and handles merge erro
     importScripts: () => { throw new Error('Blob worker must not use relative imports'); }
   });
   context.self = context;
-  const sources = await Promise.all(['mp4-remux.iife.js', 'm4s-mux.js', 'm4s-mux-worker.js']
+  const sources = await Promise.all(['mp4-remux.iife.js', 'm4s-mux.js', 'chapter-mp4.js', 'm4s-mux-worker.js']
     .map((file) => readFile(new URL('../lib/' + file, import.meta.url), 'utf8')));
   vm.runInContext(sources.join('\n;\n'), context);
   assert.equal(messages[0].type, 'READY');
   assert.equal(typeof context.BiliM4sMux.mergeM4s, 'function');
+  assert.equal(typeof context.BiliChapterMp4.muxChapter, 'function');
   await handler({ data: { type: 'MERGE', jobId: 'bad-input', videoBlob: new Blob(['bad']), audioBlob: new Blob(['bad']) } });
   assert.equal(messages.at(-1).type, 'ERROR');
   assert.equal(messages.at(-1).jobId, 'bad-input');

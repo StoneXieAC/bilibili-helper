@@ -34,6 +34,7 @@
         "https://bilibili.com/list/*"
       ],
       "js": [
+        "lib/chapter-mp4.js",
         "content/page-agent.js"
       ],
       "run_at": "document_start",
@@ -89,6 +90,7 @@
         "lib/mp4-remux.iife.js",
         "lib/m4s-mux.js",
         "lib/m4s-mux-worker.js",
+        "lib/chapter-mp4.js",
         "icons/icon128.png",
         "shared/themes-ambient-full.json"
       ],

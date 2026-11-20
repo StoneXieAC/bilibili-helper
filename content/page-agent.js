@@ -442,6 +442,7 @@
       bvid: data.bvid,
       aid: String(data.aid),
       cid: String(cid),
+      archiveTitle: data.title || 'video',
       title: title.trim(),
       pages,
       pic: data.pic || '',
@@ -574,6 +575,7 @@
   }
 
   let spaceWbiKey = '';
+  let wbiKeyRequest = null;
   async function loadSpaceCollections(cursor) {
     const match = /^\/(\d+)\/lists\/?$/.exec(location.pathname);
     if (location.hostname !== 'space.bilibili.com' || !match) throw new Error('当前不是合集汇总页');
@@ -640,23 +642,53 @@
     return loadSpacePage(cursor);
   }
 
+  async function signedWbiQuery(params) {
+    if (!spaceWbiKey && !wbiKeyRequest) wbiKeyRequest = (async () => {
+      const nav = await apiGet('/x/web-interface/nav');
+      const img = nav.wbi_img;
+      const raw = [img?.img_url, img?.sub_url].map((url) => String(url || '').split('/').pop().split('.')[0]).join('');
+      if (raw.length !== 64) throw new Error('无法读取 B 站接口签名，请刷新页面后重试');
+      spaceWbiKey = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52].map((index) => raw[index]).join('').slice(0, 32);
+      return spaceWbiKey;
+    })().finally(() => { wbiKeyRequest = null; });
+    const key = spaceWbiKey || await wbiKeyRequest;
+    const values = { ...params, wts: Math.floor(Date.now() / 1000) };
+    const query = Object.keys(values).sort().map((name) => `${encodeURIComponent(name)}=${encodeURIComponent(String(values[name]).replace(/[!'()*]/g, ''))}`).join('&');
+    return query + '&w_rid=' + spaceMd5(query + key);
+  }
+
+  async function getChapters(aid, cid, duration) {
+    if (!/^\d+$/.test(String(aid)) || !/^\d+$/.test(String(cid))) throw new Error('无效的视频或分 P 编号');
+    let data;
+    try {
+      data = await apiGet('/x/player/wbi/v2?' + await signedWbiQuery({ aid, cid }));
+    } catch (error) {
+      spaceWbiKey = '';
+      throw error;
+    }
+    if (!data || (data.view_points != null && !Array.isArray(data.view_points))) throw new Error('章节接口返回的数据无效');
+    const points = data.view_points || [];
+    const chapters = points.flatMap((point, index) => {
+      const title = typeof point?.content === 'string' ? point.content.trim() : '';
+      const start = point?.from;
+      const end = point?.to;
+      if (!title || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start ||
+          (duration > 0 && end > duration + 1)) return [];
+      return [{ number: index + 1, title, start, end }];
+    });
+    if (points.length && !chapters.length) throw new Error('章节接口未返回有效的时间区间');
+    return chapters.sort((a, b) => a.start - b.start || a.number - b.number);
+  }
+
   async function loadSpacePage(cursor) {
     const mid = location.hostname === 'space.bilibili.com' && /^\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
     if (!mid) throw new Error('当前页面不是 UP 主空间');
     if (cursor?.mid && cursor.mid !== mid) throw new Error('UP 主已切换，请重新读取投稿');
-    if (!spaceWbiKey) {
-      const nav = await apiGet('/x/web-interface/nav');
-      const img = nav.wbi_img;
-      const raw = [img?.img_url, img?.sub_url].map((url) => String(url || '').split('/').pop().split('.')[0]).join('');
-      if (raw.length !== 64) throw new Error('无法读取投稿接口签名，请刷新页面后重试');
-      spaceWbiKey = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52].map((index) => raw[index]).join('').slice(0, 32);
-    }
     const pn = Math.max(1, Number(cursor?.pn) || 1);
-    const params = { mid, pn, ps: 30, order: 'pubdate', tid: 0, keyword: '', platform: 'web', web_location: '333.1387', wts: Math.floor(Date.now() / 1000) };
-    const query = Object.keys(params).sort().map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(params[key]).replace(/[!'()*]/g, ''))}`).join('&');
+    const params = { mid, pn, ps: 30, order: 'pubdate', tid: 0, keyword: '', platform: 'web', web_location: '333.1387' };
     let data;
     try {
-      data = await apiGet('/x/space/wbi/arc/search?' + query + '&w_rid=' + spaceMd5(query + spaceWbiKey));
+      data = await apiGet('/x/space/wbi/arc/search?' + await signedWbiQuery(params));
     } catch (error) {
       spaceWbiKey = '';
       throw error;
@@ -920,11 +952,14 @@
     return { type: 'durl', urls, actualQn: Number(data.quality), actualLabel: actualQualityLabel(data, data.quality) };
   }
 
-  async function getStreams(aid, cid, qn, streamPreference = 'high-bitrate', epId = '') {
+  async function getStreams(aid, cid, qn, streamPreference = 'high-bitrate', epId = '', chapterOnly = false) {
     // Prefer the same DASH source used by the player, including 720P and below.
     // Legacy single-file sources can fail even while the DASH source plays.
     try {
       const dash = await getPlayurl(aid, cid, qn, DASH_FNVAL, epId);
+      if (chapterOnly && (Number(dash.is_preview) === 1 || Number(dash.is_drm) === 1)) {
+        throw new Error('当前片源受观看权限或内容保护限制');
+      }
       if (dash.dash?.video?.length) {
         const available = dash.dash.video.filter(v => Number(v.id) > 0 && pickBestStreamUrl(v));
         const exact = available.filter(v => Number(v.id) === Number(qn));
@@ -942,13 +977,17 @@
           video: videoUrl,
           videoUrls: extractStreamUrls(video),
           audio: audioUrl,
-          audioUrls
+          audioUrls,
+          videoTrack: video,
+          audioTracks: collectAudioItems(dash.dash)
         };
       }
     } catch (e) {
+      if (chapterOnly) throw e;
       log('步骤3', 'DASH 获取失败: ' + e.message);
     }
 
+    if (chapterOnly) throw new Error('所选清晰度没有可用于章节下载的 DASH 片源');
     return getSingleFileStreams(aid, cid, qn, epId);
   }
 
@@ -1202,6 +1241,7 @@
   }
 
   function formatAgentError(err, type) {
+    if (type === 'START_CHAPTER_DOWNLOAD') return err?.message || String(err);
     if (type !== 'RESOLVE_VIDEO' && type !== 'GET_QUALITIES') return formatDownloadError(err);
     const msg = err?.message || String(err);
     if (/HTTP (?:403|412)|API code=-403/.test(msg)) {
@@ -1372,7 +1412,7 @@
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
-  function mergeM4sInWorker(videoBlob, audioBlob, session) {
+  function mergeM4sInWorker(videoBlob, audioBlob, session, chapter) {
     if (session?.cancelled) return Promise.reject(new Error('下载已取消'));
     return new Promise((resolve, reject) => {
       const jobId = session?.jobId;
@@ -1386,7 +1426,8 @@
         type: 'MERGE_REQUEST',
         jobId,
         videoBlob,
-        audioBlob
+        audioBlob,
+        chapter
       }, '*');
       // Blob 已由 postMessage 交给内容脚本/Worker；不在等待期间额外保留引用。
       videoBlob = null;
@@ -1451,6 +1492,121 @@
       percent,
       ...extra
     });
+  }
+
+  function parseSegmentRange(value) {
+    const match = /^(\d+)-(\d+)$/.exec(value || '');
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return Number.isSafeInteger(end) && end >= start && end - start < 4 * 1024 * 1024 ? { start, end } : null;
+  }
+
+  async function fetchChapterRange(session, url, range, trackId, fileSize, onProgress) {
+    const chunks = [];
+    const length = range.end - range.start + 1;
+    let received = 0;
+    let size = fileSize;
+    while (received < length) {
+      await waitWhilePaused(session);
+      throwIfCancelled(session);
+      const epoch = session.pauseEpoch;
+      const controller = new AbortController();
+      session.controllers[trackId] = controller;
+      const start = range.start + received;
+      let reader;
+      try {
+        const response = await withStallTimeout(fetch(url, {
+          credentials: 'omit', referrer: location.href, referrerPolicy: 'strict-origin-when-cross-origin',
+          headers: { Range: `bytes=${start}-${range.end}` }, signal: controller.signal
+        }), controller, 30000);
+        const header = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') || '');
+        if (response.status !== 206 || !header || Number(header[1]) !== start ||
+            Number(header[2]) !== range.end || !Number.isSafeInteger(Number(header[3])) ||
+            Number(header[3]) <= range.end || (size && size !== Number(header[3])) || !response.body) {
+          throw new Error('片源未返回有效的章节字节范围，请切换清晰度后重试');
+        }
+        size = Number(header[3]);
+        reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await withStallTimeout(reader.read(), controller, 30000);
+          throwIfCancelled(session);
+          if (done) break;
+          if (received + value.byteLength > length) throw new Error('章节下载字节数与请求范围不符');
+          chunks.push(value);
+          received += value.byteLength;
+          onProgress?.(received, length);
+        }
+        if (received !== length) throw new Error('章节下载数据不完整，请重试');
+      } catch (error) {
+        throwIfCancelled(session);
+        if (epoch === session.pauseEpoch || received === length) throw error;
+      } finally {
+        controller.abort();
+        reader?.releaseLock();
+      }
+    }
+    return { blob: new Blob(chunks), size };
+  }
+
+  async function downloadChapterTrack(session, tracks, chapter, trackId, onProgress) {
+    let failure = new Error('片源没有可用的章节媒体索引');
+    for (const track of tracks) {
+      const segment = track?.SegmentBase || track?.segment_base;
+      const init = parseSegmentRange(segment?.Initialization || segment?.initialization);
+      const index = parseSegmentRange(segment?.indexRange || segment?.index_range);
+      if (!init || !index || init.start !== 0 || init.end >= index.start) continue;
+      const urls = new Set();
+      for (const original of extractStreamUrls(track)) {
+        for (const url of prioritizeCandidates(buildCdnCandidates(original))) {
+          if (isDownloadableCdnUrl(url)) urls.add(url);
+        }
+      }
+      // Offsets are representation-specific. Always re-read the index when changing URL.
+      for (const url of urls) {
+        try {
+          const indexResult = await fetchChapterRange(session, url, index, trackId);
+          const range = globalThis.BiliChapterMp4.chapterRange(new Uint8Array(await indexResult.blob.arrayBuffer()),
+            index.start, indexResult.size, chapter.start, chapter.end, trackId === 'video');
+          const initialization = await fetchChapterRange(session, url, init, trackId, indexResult.size);
+          const media = await fetchChapterRange(session, url, range, trackId, indexResult.size, onProgress);
+          return new Blob([initialization.blob, media.blob]);
+        } catch (error) {
+          throwIfCancelled(session);
+          failure = error;
+        }
+      }
+    }
+    throw failure;
+  }
+
+  async function handleChapterDownload({ aid, cid, qn, streamPreference, jobId, chapter }) {
+    if (!Number.isFinite(chapter?.start) || !Number.isFinite(chapter?.end) ||
+        chapter.start < 0 || chapter.end <= chapter.start) throw new Error('无效的章节时间区间');
+    const session = createSession(jobId);
+    try {
+      throwIfCancelled(session);
+      const streams = await getStreams(aid, cid, qn, streamPreference, '', true);
+      const report = (trackId) => (received, total) => {
+        reportDownloadProgress(session, 'chapter-' + trackId, { received, total }, () => {
+          const all = getDisplayProgress(session);
+          sendProgress(session, 'download', all.percent, all);
+        });
+      };
+      const [video, audio] = await Promise.all([
+        downloadChapterTrack(session, [streams.videoTrack], chapter, 'video', report('video')),
+        downloadChapterTrack(session, streams.audioTracks, chapter, 'audio', report('audio'))
+      ]);
+      await waitWhilePaused(session);
+      throwIfCancelled(session);
+      session.merging = true;
+      sendProgress(session, 'merge', 0, { received: 0, total: video.size + audio.size });
+      const blob = await mergeM4sInWorker(video, audio, session, chapter);
+      throwIfCancelled(session);
+      return { blob, actualQn: streams.actualQn, actualLabel: streams.actualLabel, jobId: session.jobId };
+    } finally {
+      destroySession(session.jobId);
+    }
   }
 
   async function handleDownload(aid, cid, qn, title, jobId, filenameBase, streamPreference = 'high-bitrate', includeAudioBlob = false, epId = '') {
@@ -1645,6 +1801,12 @@
         }
         case 'GET_QUALITIES':
           reply(id, { type: 'OK', data: await getQualities(e.data.aid, e.data.cid, e.data.epId) });
+          break;
+        case 'GET_CHAPTERS':
+          reply(id, { type: 'OK', data: { chapters: await getChapters(e.data.aid, e.data.cid, e.data.duration) } });
+          break;
+        case 'START_CHAPTER_DOWNLOAD':
+          reply(id, { type: 'OK', data: await handleChapterDownload(e.data) });
           break;
         case 'GET_ESTIMATE':
           reply(id, {
