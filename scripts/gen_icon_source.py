@@ -8,7 +8,7 @@ import os
 from PIL import Image, ImageDraw
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'assets', 'icon-source.png')
+OUT = os.path.join(ROOT, 'assets', 'icon-iters', 'icon-old-monochrome.png')
 
 SIZE = 1024
 BG = (17, 17, 17)               # #111 近黑底

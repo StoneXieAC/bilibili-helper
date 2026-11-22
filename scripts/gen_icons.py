@@ -1,19 +1,24 @@
-"""Generate Bilibili icons from shared-download-kit/brand-assets/bilibili.png.
-
-Do NOT remap YouTube icons — that path restores the obsolete blue remap art.
-"""
+"""从本仓库的透明母图生成扩展图标。"""
 from pathlib import Path
-import sys
+from shutil import copyfile
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-KIT_SCRIPTS = ROOT.parent / "shared-download-kit" / "scripts"
-sys.path.insert(0, str(KIT_SCRIPTS))
-
-from gen_platform_icons import generate_for  # noqa: E402
+ASSETS = ROOT / "assets"
+ICONS = ROOT / "icons"
 
 
 def main() -> None:
-    generate_for("bilibili", ROOT)
+    source = ASSETS / "icon-source.png"
+    with Image.open(source) as image:
+        master = image.convert("RGBA")
+
+    copyfile(source, ICONS / source.name)
+    for size in (16, 32, 48, 128):
+        output = ICONS / f"icon{size}.png"
+        master.resize((size, size), Image.Resampling.LANCZOS).save(output, optimize=True)
+        copyfile(output, ASSETS / output.name)
 
 
 if __name__ == "__main__":

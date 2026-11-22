@@ -1,12 +1,4 @@
-"""Final extension icon — Chrome/Edge store aesthetic.
-
-Guidelines applied (developer.chrome.com/docs/webstore/images):
-- Artwork ~75–80% of canvas (≈96/128), not edge-to-edge
-- Circular mark diameter ~80–85% max; leave breathing room
-- 2–3 colors, flat, front-facing, no baked store chrome
-- Strong silhouette that still reads at 16px
-- Subtle outer glow so dark icons work on dark toolbars
-"""
+"""生成旧版深色断环图标的设计稿。"""
 from __future__ import annotations
 
 import math
@@ -50,7 +42,7 @@ def thick_line(draw, p0, p1, width, color):
 
 
 def soft_glow(base: Image.Image, color, blur=18, alpha=55) -> Image.Image:
-    """Subtle halo for dark-toolbar readability (Chrome store tip)."""
+    """Subtle halo for dark-toolbar readability."""
     mask = base.split()[-1]
     tint = Image.new("RGBA", base.size, (*color[:3], alpha))
     tint.putalpha(mask.point(lambda a: min(255, int(a * 0.7))))
@@ -133,44 +125,9 @@ def compose() -> Image.Image:
     return img
 
 
-def export(img: Image.Image) -> None:
-    img.save(OUT / "icon-source.png", "PNG", optimize=True)
-    img.save(ITERS / "icon-iter-14-moderate.png", "PNG", optimize=True)
-
-    for size in (16, 32, 48, 128):
-        if size <= 32:
-            # Slightly simplify weight at tiny sizes via unsharp after supersample
-            big = img.resize((size * 4, size * 4), Image.Resampling.LANCZOS)
-            big = big.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
-            out = big.resize((size, size), Image.Resampling.LANCZOS)
-        else:
-            out = img.resize((size, size), Image.Resampling.LANCZOS)
-        out.save(ROOT / "icons" / f"icon{size}.png", "PNG", optimize=True)
-
-    img.resize((300, 300), Image.Resampling.LANCZOS).save(ROOT / "store" / "logo-300.png", "PNG")
-
-    w, h = 440, 280
-    tile = Image.new("RGB", (w, h), (15, 23, 42))
-    td = ImageDraw.Draw(tile)
-    for y in range(h):
-        t = y / h
-        td.line(
-            [(0, y), (w, y)],
-            fill=(int(15 + 12 * t), int(23 + 14 * (1 - t)), int(42 + 20 * (1 - t))),
-        )
-    ic = img.resize((132, 132), Image.Resampling.LANCZOS)
-    tile.paste(ic, (40, (h - 132) // 2), ic)
-    td.rounded_rectangle([200, 88, 400, 192], radius=14, fill=(26, 35, 50))
-    td.rectangle([218, 118, 340, 128], fill=(255, 255, 255))
-    td.rectangle([218, 140, 300, 148], fill=(148, 163, 184))
-    td.rounded_rectangle([218, 160, 256, 178], radius=5, fill=(0, 161, 214))
-    td.rounded_rectangle([264, 160, 302, 178], radius=5, fill=(251, 114, 153))
-    tile.save(ROOT / "store" / "tile-440x280.png", "PNG")
-
-
 def main() -> None:
     img = compose()
-    export(img)
+    img.save(ITERS / "icon-iter-14-moderate.png", "PNG", optimize=True)
     # quick fill report
     px = img.load()
     br, bg, bb = BG[:3]

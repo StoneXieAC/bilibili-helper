@@ -24,7 +24,7 @@
       .sort((a, b) => Number(b.qn) - Number(a.qn))[0];
   }
   // 图标资源缓存破坏：换图标后递增 ICON_REV，避免只 F5 仍显示旧图
-  const ICON_REV = '27';
+  const ICON_REV = '28';
   const ICON_URL = EXT.runtime.getURL(`icons/icon128.png?r=${ICON_REV}`);
   const DOWNLOAD_PREFS_KEY = 'biliDlDownloadPrefs_v1';
   const THEME_PREF_KEY = 'biliDlTheme_v1';

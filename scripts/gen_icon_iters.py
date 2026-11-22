@@ -292,37 +292,6 @@ VARIANTS = [
 ]
 
 
-def export_sizes(final: Image.Image) -> None:
-    for size in (16, 32, 48, 128):
-        if size <= 32:
-            big = final.resize((size * 4, size * 4), Image.Resampling.LANCZOS)
-            big = big.filter(ImageFilter.UnsharpMask(radius=1.15, percent=150, threshold=2))
-            out = big.resize((size, size), Image.Resampling.LANCZOS)
-        else:
-            out = final.resize((size, size), Image.Resampling.LANCZOS)
-        out.save(ROOT / "icons" / f"icon{size}.png", "PNG", optimize=True)
-
-    final.resize((300, 300), Image.Resampling.LANCZOS).save(ROOT / "store" / "logo-300.png", "PNG")
-
-    w, h = 440, 280
-    tile = Image.new("RGB", (w, h), (10, 16, 28))
-    td = ImageDraw.Draw(tile)
-    for y in range(h):
-        t = y / h
-        td.line(
-            [(0, y), (w, y)],
-            fill=(int(10 + 16 * t), int(16 + 20 * (1 - t)), int(28 + 34 * (1 - t))),
-        )
-    ic = final.resize((152, 152), Image.Resampling.LANCZOS)
-    tile.paste(ic, (30, (h - 152) // 2), ic)
-    td.rounded_rectangle([208, 84, 414, 196], radius=16, fill=(26, 35, 50))
-    td.rectangle([226, 116, 358, 126], fill=(255, 255, 255))
-    td.rectangle([226, 138, 318, 146], fill=(148, 163, 184))
-    td.rounded_rectangle([226, 158, 266, 178], radius=6, fill=(0, 161, 214))
-    td.rounded_rectangle([274, 158, 314, 178], radius=6, fill=(251, 114, 153))
-    tile.save(ROOT / "store" / "tile-440x280.png", "PNG")
-
-
 def main() -> None:
     lines = [
         "图标迭代说明（审美评审）",
@@ -342,12 +311,10 @@ def main() -> None:
 
     final = compose(VARIANTS[-1])
     final.save(OUT / "icon-iter-13-final.png", "PNG", optimize=True)
-    final.save(ROOT / "assets" / "icon-source.png", "PNG", optimize=True)
-    export_sizes(final)
 
     lines += [
         "",
-        "定稿：`assets/icon-source.png` / `icons/icon*.png`",
+        "历史定稿：`icon-iter-13-final.png`",
         "重生：`python scripts/gen_icon_iters.py`",
     ]
     (OUT / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
