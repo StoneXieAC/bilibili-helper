@@ -1540,7 +1540,8 @@
         if (received !== length) throw new Error('章节下载数据不完整，请重试');
       } catch (error) {
         throwIfCancelled(session);
-        if (epoch === session.pauseEpoch || received === length) throw error;
+        // A pause can abort the EOF read after all requested bytes have arrived.
+        if (epoch === session.pauseEpoch || (received === length && error?.name !== 'AbortError')) throw error;
       } finally {
         controller.abort();
         reader?.releaseLock();

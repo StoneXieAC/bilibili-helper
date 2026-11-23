@@ -95,6 +95,15 @@ test('Range rejects a full or mismatched response before reading and checks actu
     status: 206, headers: { 'Content-Range': 'bytes 10-19/100' }
   }));
   await assert.rejects(ctx.fetchChapterRange(session, '', range, 'video'), /下载数据不完整/);
+
+  const oversized = rangeHarness(async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(10));
+      controller.enqueue(new Uint8Array(1));
+      controller.close();
+    }
+  }), { status: 206, headers: { 'Content-Range': 'bytes 10-19/100' } }));
+  await assert.rejects(oversized.fetchChapterRange(session, '', range, 'video'), /字节数与请求范围不符/);
 });
 
 test('bounded download resumes at the next byte and cancels outstanding reads', async () => {
@@ -127,6 +136,31 @@ test('bounded download resumes at the next byte and cancels outstanding reads', 
   session.cancelled = true;
   await assert.rejects(ctx.fetchChapterRange(session, '', { start: 10, end: 14 }, 'video'), /下载已取消/);
   assert.equal(ranges.length, 2);
+});
+
+test('pausing while waiting for EOF retains a complete byte range', async () => {
+  const ranges = [];
+  const session = { controllers: {}, pauseEpoch: 0 };
+  const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+  const ctx = rangeHarness(async (_url, { headers, signal }) => {
+    ranges.push(headers.Range);
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes);
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      }
+    }), { status: 206, headers: { 'Content-Range': 'bytes 10-14/20' } });
+  });
+  const file = await ctx.fetchChapterRange(session, '', { start: 10, end: 14 }, 'video', 20, () => {
+    queueMicrotask(() => {
+      session.paused = true;
+      session.pauseEpoch++;
+      session.controllers.video.abort();
+    });
+  });
+  assert.deepEqual(ranges, ['bytes=10-14']);
+  assert.deepEqual(new Uint8Array(await file.blob.arrayBuffer()), bytes);
+  assert.equal(session.paused, true);
 });
 
 test('player metadata preserves chapter numbers after validation and sorting', async () => {
