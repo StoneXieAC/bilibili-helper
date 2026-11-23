@@ -162,14 +162,7 @@
   function styleSwatch(swatch, themeId) {
     if (!swatch) return;
     swatch.dataset.theme = themeId;
-    swatch.style.backgroundImage = '';
-    swatch.style.backgroundColor = '';
-    if (themeId === DEFAULT_THEME_ID) {
-      swatch.style.background = 'linear-gradient(135deg, #00AEEC, #0074DA)';
-      return;
-    }
-    const preview = getTheme(themeId)?.gradients?.preview;
-    if (preview) swatch.style.backgroundImage = preview;
+    swatch.style.backgroundImage = getTheme(themeId)?.gradients?.preview || '';
   }
 
   function syncPicker(themeControl, root, themeId) {

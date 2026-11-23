@@ -97,6 +97,7 @@ assert.equal(themedPanel.dataset.themeKind, undefined);
 
 assert.equal(applyTheme('obsidian'), 'obsidian');
 assert.equal(themedPanel.dataset.theme, 'obsidian');
+assert.equal(currentSwatch.style.backgroundImage, themesJson.themes.find((theme) => theme.id === 'obsidian').gradients.preview);
 assert.equal(themedPanel.dataset.themeKind, 'ambient');
 
 assert.equal(applyTheme('cyan-mist'), 'mist-cyan');
@@ -109,5 +110,7 @@ applyTheme('bilibili');
 assert.equal(themedPanel.dataset.theme, 'bilibili');
 assert.equal(themedPanel.dataset.themeKind, undefined);
 assert.equal(vars['--bg'], undefined);
+assert.equal(currentSwatch.dataset.theme, 'bilibili');
+assert.equal(currentSwatch.style.backgroundImage, '');
 
 console.log('theme settings checks passed');

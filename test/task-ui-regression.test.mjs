@@ -41,7 +41,7 @@ assert.doesNotMatch(js, /class="bili-dl-footer-links">[\s\S]{0,400}隐私政策/
 assert.match(js, /function fillSettingsSheet\(/);
 assert.match(js, /Could not establish connection\|Receiving end does not exist/);
 assert.match(js, /扩展已更新，请刷新当前 B 站页面后重试/);
-assert.match(css, /#eef0f3/);
+assert.match(css, /\.bili-dl-footer\s*\{[^}]*border-top:\s*1px solid var\(--border-soft\)/);
 assert.match(js, /function buildFilenameBase\(/);
 assert.match(js, /filenameTemplate/);
 assert.doesNotMatch(background, /BILI_DL_OPEN_OPTIONS/);
