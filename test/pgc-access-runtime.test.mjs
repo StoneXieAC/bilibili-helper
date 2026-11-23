@@ -4,8 +4,47 @@ import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../content/content.js', import.meta.url), 'utf8');
+const agent = await readFile(new URL('../content/page-agent.js', import.meta.url), 'utf8');
+const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const allowed = { state: 'checked', video: true, audio: true };
+
+test('简体中文剧集页匹配两个脚本，并通过官方剧集接口读取选集', async () => {
+  const match = 'https://www.bilibili.com/zh-Hans/bangumi/play/*';
+  for (const script of ['content/page-agent.js', 'content/content.js']) {
+    assert.ok(manifest.content_scripts.some(entry => entry.js.includes(script) && entry.matches.includes(match)));
+  }
+
+  for (const [path, query] of [
+    ['/zh-Hans/bangumi/play/ss1637?from_spmid=666.25.series.0', 'season_id=1637'],
+    ['/zh-Hans/bangumi/play/ep123', 'ep_id=123'],
+    ['/bangumi/play/ss1637', 'season_id=1637']
+  ]) {
+    const location = new URL(path, 'https://www.bilibili.com');
+    const requests = [], replies = [];
+    let onMessage;
+    const window = {
+      addEventListener(_type, listener) { onMessage = listener; },
+      postMessage(message) { if (message.id) replies.push(message); }
+    };
+    vm.runInNewContext(agent, {
+      window, location, URL, AbortController, setTimeout, clearTimeout,
+      console: { log() {} },
+      async fetch(url) {
+        requests.push(url);
+        return { ok: true, async json() {
+          return { code: 0, result: { title: '测试剧集', episodes: [{ id: 123, aid: 1, cid: 2 }] } };
+        } };
+      }
+    });
+    await onMessage({ source: window, data: { source: 'bili-dl-panel', id: 'list', type: 'RESOLVE_LIST' } });
+    assert.deepEqual(requests, [`https://api.bilibili.com/pgc/view/web/season?${query}`]);
+    const [reply] = replies;
+    assert.equal(reply.type, 'OK');
+    assert.equal(reply.data.pgc, true);
+    assert.equal(reply.data.items[0].epId, '123');
+  }
+});
 
 function harness(count = 10) {
   let now = 0;

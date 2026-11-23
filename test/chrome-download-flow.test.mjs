@@ -61,17 +61,21 @@ test('工具栏发送一次打开消息，面板确认后关闭，失败时保�
   await context.init();
   assert.deepEqual(messages, [[1, { type: 'BILI_DL_OPEN_PANEL', fromToolbar: true }]]);
   assert.equal(closed, 1);
+  tab.url = 'https://www.bilibili.com/zh-Hans/bangumi/play/ss1637?from_spmid=666.25.series.0';
+  await context.init();
+  assert.deepEqual(messages[1], [1, { type: 'BILI_DL_OPEN_PANEL', fromToolbar: true }]);
+  assert.equal(closed, 2);
   tab.url = 'https://www.bilibili.com/video/BVtest';
   succeeds = false;
   await context.init();
-  assert.deepEqual(messages[1], [1, { type: 'BILI_DL_OPEN_PANEL', fromToolbar: true }]);
+  assert.deepEqual(messages[2], [1, { type: 'BILI_DL_OPEN_PANEL', fromToolbar: true }]);
   assert.equal(state, 'state-error');
-  assert.equal(closed, 1);
+  assert.equal(closed, 2);
   await nodes.get('btn-retry').onclick();
   assert.equal(reloaded, 1);
   tab.url = 'https://notbilibili.com/video/BVtest';
   await context.init();
-  assert.equal(messages.length, 2);
+  assert.equal(messages.length, 3);
   assert.equal(state, 'empty');
 });
 

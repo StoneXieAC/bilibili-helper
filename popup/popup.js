@@ -118,7 +118,7 @@ function isBiliDownloadUrl(url) {
     const { protocol, hostname, pathname } = new URL(url);
     if (protocol !== 'https:') return false;
     if (hostname === 'space.bilibili.com') return isSpaceDownloadUrl(url);
-    if (hostname === 'www.bilibili.com' && pathname.startsWith('/bangumi/play/')) return true;
+    if (hostname === 'www.bilibili.com' && /^\/(?:zh-Hans\/)?bangumi\/play\//.test(pathname)) return true;
     if (['www.bilibili.com', 'bilibili.com'].includes(hostname) && pathname.startsWith('/list/')) return true;
     return ['www.bilibili.com', 'bilibili.com', 'm.bilibili.com'].includes(hostname) && pathname.startsWith('/video/');
   } catch {

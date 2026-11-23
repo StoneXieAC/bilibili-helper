@@ -775,7 +775,7 @@
 
   async function resolveList(cursor) {
     if (location.hostname === 'space.bilibili.com') return loadSpaceList(cursor || null);
-    if (/^\/bangumi\/play\/(?:ep|ss)\d+/i.test(location.pathname)) {
+    if (/^\/(?:zh-Hans\/)?bangumi\/play\/(?:ep|ss)\d+/i.test(location.pathname)) {
       const info = await resolveVideo(location.href, 0);
       if (!info.collection) throw new Error('当前官方剧集未提供可下载的选集');
       return info.collection;
